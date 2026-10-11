@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>合宿アプリ 運営パネル</title>
+<meta name="robots" content="noindex, nofollow">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+<script src="common.js"></script>
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="admin">
+
+<div id="login" class="login">
+  <h1>合宿アプリ 運営パネル</h1>
+  <p class="sub">運営陣で共有しているパスコードを入れてください。</p>
+  <input id="pass" type="password" class="input" placeholder="運営パスコード" autocomplete="current-password">
+  <button class="btn primary" id="login-btn">入る</button>
+  <p class="err" id="login-err"></p>
+</div>
+
+<div id="main" hidden>
+  <header class="adm-hd">
+    <b>運営パネル</b>
+    <span class="sub" id="now-scene"></span>
+    <a href="screen.html" target="_blank" class="sub">スクリーン画面を開く</a>
+    <button class="btn small" id="logout">ログアウト</button>
+  </header>
+  <nav class="adm-tabs" id="adm-tabs"></nav>
+  <main id="pane"></main>
+</div>
+<div id="toast"></div>
+
+<script>
+let code = sessionStorage.getItem('adm_code') || '';
+let live = { scene: 'idle', payload: {} };
+let tab = 'live';
+
+const $pane = document.getElementById('pane');
+const toast = (msg, bad) => { const t = document.getElementById('toast'); t.textContent = msg; t.className = 'show' + (bad ? ' bad' : ''); setTimeout(() => t.className = '', 2500); };
+async function rpc(fn, args) {
+  const { data, error } = await sb.rpc(fn, { code, ...args });
+  if (error) { toast(error.message, true); throw error; }
+  return data;
+}
+
+// ===== ログイン =====
+async function login(c) {
+  const { data, error } = await sb.rpc('admin_check', { code: c });
+  if (error) { document.getElementById('login-err').textContent = `接続できません：${error.message}`; return; }
+  if (!data) { document.getElementById('login-err').textContent = 'パスコードが違います'; sessionStorage.removeItem('adm_code'); return; }
+  code = c; sessionStorage.setItem('adm_code', c);
+  document.getElementById('login').hidden = true;
+  document.getElementById('main').hidden = false;
+  init();
+}
+document.getElementById('login-btn').onclick = () => login(document.getElementById('pass').value);
+document.getElementById('pass').onkeydown = e => { if (e.key === 'Enter') login(e.target.value); };
+document.getElementById('logout').onclick = () => { sessionStorage.removeItem('adm_code'); location.reload(); };
+if (code) login(code);
+
+// ===== 編集する表の定義（タブ = 1つの表） =====
+const TABLES = {
+  settings: { label: '基本情報', single: true, note: '参加者のホーム画面の一番上に出ます。', fields: [
+    { k: 'title', label: '合宿の名前' }, { k: 'period_text', label: '日程（表示用）' }, { k: 'venue', label: '会場' },
+    { k: 'message', label: 'ひとこと（ホームに表示）', type: 'textarea' }] },
+  schedule_items: { label: '日程', note: '参加者のホームに日付ごとに並びます。いまの時間帯には「いま」の印が付きます。',
+    sort: (a, b) => (a.date + a.start_time).localeCompare(b.date + b.start_time),
+    fields: [{ k: 'date', label: '日付', type: 'date' }, { k: 'start_time', label: '開始', type: 'time' }, { k: 'end_time', label: '終了', type: 'time' },
+      { k: 'title', label: '内容' }, { k: 'place', label: '場所' }, { k: 'note', label: 'メモ（持ち物など）', type: 'textarea' }],
+    blank: () => ({ date: '2027-01-08', start_time: '09:00' }) },
+  guide_pages: { label: 'しおり', note: '参加者の「しおり」タブに、並び順の小さい順に出ます。',
+    sort: (a, b) => a.sort - b.sort,
+    fields: [{ k: 'title', label: '見出し' }, { k: 'body', label: '本文', type: 'textarea', rows: 6 }, { k: 'sort', label: '並び順', type: 'number' }] },
+  notices: { label: 'お知らせ', note: '追加するとすぐに参加者のホームの上に出ます（新しい順に10件）。',
+    sort: (a, b) => b.created_at.localeCompare(a.created_at),
+    fields: [{ k: 'body', label: 'お知らせの文面', type: 'textarea' }] },
+  members: { label: '名簿', note: '会社の情報を外に出さないため、名前は<b>ひらがなの下の名前かニックネーム</b>で入れます（例：れいや）。名字・漢字の氏名・社名は入れません。同じ呼び名の人がいたら「れいや2」のように分けます。参加者には、ここに入れた呼び名で申請してもらいます。',
+    sort: (a, b) => a.sort - b.sort || a.name.localeCompare(b.name, 'ja'), bulk: true,
+    fields: [{ k: 'name', label: '呼び名（ひらがな・ニックネーム）' }, { k: 'team', label: '班' }, { k: 'room', label: '部屋' }, { k: 'sort', label: '並び順', type: 'number' }] },
+  awards: { label: '表彰', secret: true, note: '経営陣が決めた部門と受賞者を入れます。受賞者も名簿と同じ呼び名で入れます。発表するまで参加者からは見えません。発表は「進行」タブから行います。',
+    sort: (a, b) => a.sort - b.sort,
+    fields: [{ k: 'category', label: '部門' }, { k: 'winner', label: '受賞者' }, { k: 'comment', label: '受賞理由・ひとこと', type: 'textarea' }, { k: 'sort', label: '発表順', type: 'number' }] },
+  reveals: { label: '重大発表', secret: true, note: 'ここには<b>見出しだけ</b>を入れます（例：「新しい取り組みの発表」）。社外に出せない中身（取引先・金額・人事など）は入れず、スライドや口頭で伝えます。発表するまで参加者からは見えません。',
+    sort: (a, b) => a.sort - b.sort,
+    fields: [{ k: 'title', label: '発表の見出し' }, { k: 'body', label: 'ひとこと（任意。社外秘の中身は書かない）', type: 'textarea', rows: 3 }, { k: 'sort', label: '発表順', type: 'number' }] },
+  quiz_questions: { label: 'クイズ', note: '選択肢は1行に1つ書きます。正解は上から数えた番号（1から）で入れます。',
+    sort: (a, b) => a.order_no - b.order_no,
+    fields: [{ k: 'order_no', label: '問題番号', type: 'number' }, { k: 'question_text', label: '問題文', type: 'textarea' },
+      { k: 'choices', label: '選択肢（1行に1つ）', type: 'lines' }, { k: 'correct_index', label: '正解の番号', type: 'number', offset: 1 }],
+    blank: rows => ({ order_no: Math.max(0, ...rows.map(r => r.order_no)) + 1, choices: ['', '', '', ''], correct_index: 0 }) },
+};
+const TAB_ORDER = [['live', '進行'], ['devices', '参加申請'], ...Object.entries(TABLES).map(([k, v]) => [k, v.label]), ['config', '設定']];
+
+function init() {
+  document.getElementById('adm-tabs').innerHTML = TAB_ORDER.map(([k, l]) => `<button data-t="${k}">${l}</button>`).join('');
+  document.querySelectorAll('#adm-tabs button').forEach(b => b.onclick = () => setTab(b.dataset.t));
+  call('live_view', { p_key: code }).then(l => { live = l; showScene(); setTab(tab); });
+  // 入力中に画面が書き換わらないよう、自動で描き直すのは「進行」「参加申請」タブだけ
+  const reload = debounce(async () => {
+    try { live = await call('live_view', { p_key: code }); showScene(); } catch (e) { return; }
+    if (tab === 'live') renderLive();
+  }, 300);
+  onPulse(topic => {
+    if (topic === 'content' && tab === 'devices') renderDevices();
+    if (topic !== 'content') reload();
+  });
+}
+const SCENE = { idle: '待機中', work: 'ワーク', award: '表彰', reveal: '重大発表', quiz: 'クイズ', buzz: '早押し', bingo: 'ビンゴ' };
+function showScene() { document.getElementById('now-scene').textContent = `いまの場面：${SCENE[live.scene]}`; }
+
+function setTab(t) {
+  tab = t;
+  document.querySelectorAll('#adm-tabs button').forEach(b => b.classList.toggle('on', b.dataset.t === t));
+  if (t === 'live') renderLive();
+  else if (t === 'devices') renderDevices();
+  else if (t === 'config') renderConfig();
+  else renderTable(t);
+}
+
+// ===== 表の編集（どの表も同じ作り） =====
+function fieldHtml(f, v) {
+  const val = f.type === 'lines' ? (v || []).join('\n') : f.offset ? (v ?? 0) + f.offset : f.type === 'time' ? hhmm(v) : (v ?? '');
+  if (f.type === 'textarea' || f.type === 'lines') return `<label>${f.label}<textarea data-k="${f.k}" rows="${f.rows || (f.type === 'lines' ? 4 : 3)}">${esc(val)}</textarea></label>`;
+  return `<label>${f.label}<input data-k="${f.k}" type="${f.type || 'text'}" value="${esc(val)}"></label>`;
+}
+function readRow(card, def) {
+  const row = {};
+  for (const f of def.fields) {
+    const el = card.querySelector(`[data-k="${f.k}"]`);
+    let v = el.value;
+    if (f.type === 'lines') v = v.split('\n').map(s => s.trim()).filter(Boolean);
+    else if (f.type === 'number') v = v === '' ? 0 : Number(v) - (f.offset || 0);
+    else if ((f.type === 'time' || f.type === 'date') && v === '') v = null;
+    row[f.k] = v;
+  }
+  return row;
+}
+
+async function renderTable(t) {
+  const def = TABLES[t];
+  $pane.innerHTML = '<p class="sub">読み込み中…</p>';
+  let rows = await rpc('admin_list', { tbl: t });
+  if (def.sort) rows.sort(def.sort);
+  const pk = t === 'quiz_questions' ? 'order_no' : 'id';
+  const card = (r, isNew) => `<div class="ecard ${isNew ? 'new' : ''}" data-id="${isNew ? '' : esc(r[pk])}">
+      ${def.fields.map(f => fieldHtml(f, r[f.k])).join('')}
+      ${t === 'awards' || t === 'reveals' ? `<div class="sub">${r.revealed ? '発表済み' : '未発表'}</div>` : ''}
+      <div class="row-btns"><button class="btn primary small" data-save>${isNew ? '追加する' : '保存'}</button>
+      ${!isNew && !def.single ? '<button class="btn small danger" data-del>削除</button>' : ''}</div></div>`;
+  $pane.innerHTML = `<h2>${def.label}${def.secret ? ' <span class="secret">発表まで非公開</span>' : ''}</h2><p class="sub">${def.note}</p>
+    ${t === 'members' ? `<p class="sub">${rows.length} 人。参加者の承認は「参加申請」タブで行います。</p>
+      <details class="ecard"><summary>まとめて追加する</summary><p class="sub">1行に1人、「呼び名,班,部屋」の形で貼り付けます（班と部屋は省略できます）。</p>
+      <textarea id="bulk" rows="8" placeholder="れいや,A班,201"></textarea><button class="btn primary small" id="bulk-add">まとめて追加する</button></details>` : ''}
+    ${def.single ? '' : card(def.blank ? def.blank(rows) : {}, true)}
+    ${rows.map(r => card(r, false)).join('')}`;
+
+  $pane.querySelectorAll('.ecard[data-id]').forEach(el => {
+    el.querySelector('[data-save]')?.addEventListener('click', async () => {
+      const row = readRow(el, def);
+      if (el.dataset.id && pk === 'id') row.id = el.dataset.id;
+      if (def.single) row.id = 1;
+      if (t === 'quiz_questions' && el.dataset.id && String(row.order_no) !== el.dataset.id) await rpc('admin_delete', { tbl: t, row_id: el.dataset.id });
+      await rpc('admin_save', { tbl: t, row_data: row });
+      toast('保存しました'); renderTable(t);
+    });
+    el.querySelector('[data-del]')?.addEventListener('click', async () => {
+      if (!confirm('削除します。よろしいですか？')) return;
+      await rpc('admin_delete', { tbl: t, row_id: el.dataset.id });
+      toast('削除しました'); renderTable(t);
+    });
+  });
+  document.getElementById('bulk-add')?.addEventListener('click', async () => {
+    const lines = document.getElementById('bulk').value.split('\n').map(s => s.trim()).filter(Boolean);
+    const base = rows.length;
+    for (const [i, line] of lines.entries()) {
+      const [name, team = '', room = ''] = line.split(/[,，\t]/).map(s => s.trim());
+      if (name) await rpc('admin_save', { tbl: 'members', row_data: { name, team, room, sort: base + i + 1 } });
+    }
+    toast(`${lines.length}人を追加しました`); renderTable(t);
+  });
+}
+
+// ===== 参加申請 =====
+async function renderDevices() {
+  const [devs, members] = await Promise.all([rpc('admin_devices', {}), rpc('admin_list', { tbl: 'members' })]);
+  members.sort((a, b) => a.sort - b.sort || a.name.localeCompare(b.name, 'ja'));
+  const pending = devs.filter(d => d.status === 'pending'), approved = devs.filter(d => d.status === 'approved');
+  const joined = new Set(approved.map(d => d.member_id));
+  const notYet = members.filter(m => !joined.has(m.id));
+  const opts = sel => `<option value="">名簿から選ぶ</option>` + members.map(m => `<option value="${m.id}" ${m.id === sel ? 'selected' : ''}>${esc(m.name)}</option>`).join('');
+  $pane.innerHTML = `<h2>参加申請</h2>
+    <p class="sub">参加者がアプリで名前を入れると、ここに申請が届きます。<b>社員本人かどうかを確かめてから</b>承認してください。承認した端末だけが、合宿の案内や名簿を見られます。</p>
+    <section class="ecard"><h3>承認待ち（${pending.length}件）</h3>
+      ${pending.length ? `<p class="sub">名簿の名前と一致したものは、名簿の欄が埋まっています。</p>
+        <button class="btn primary small" id="approve-matched" ${pending.some(d => d.member_id) ? '' : 'disabled'}>名簿と一致したものをまとめて承認</button>` : '<p class="sub">ありません</p>'}
+      ${pending.map(d => `<div class="present" data-dev="${d.id}">
+        <span>入力：<b>${esc(d.typed_name)}</b><br><span class="sub">LINE の名前：${esc(d.line_name) || '（なし）'}　${new Date(d.created_at).toLocaleString('ja-JP')}</span></span>
+        <span class="row-btns"><select data-member>${opts(d.member_id)}</select>
+        <button class="btn primary small" data-approve>承認</button><button class="btn small danger" data-remove>却下</button></span></div>`).join('')}
+    </section>
+    <section class="ecard"><h3>承認済み（${joined.size} / ${members.length} 人）</h3>
+      ${approved.map(d => `<div class="present" data-dev="${d.id}"><span>${esc(d.member_name)} <span class="sub">（LINE：${esc(d.line_name) || 'なし'}）</span></span>
+        <button class="btn small danger" data-remove>承認を取り消す</button></div>`).join('') || '<p class="sub">まだいません</p>'}
+      ${notYet.length ? `<p class="sub">まだ参加していない人：${notYet.map(m => esc(m.name)).join('、')}</p>` : ''}
+    </section>`;
+  document.getElementById('approve-matched')?.addEventListener('click', async () => {
+    const n = await rpc('admin_approve_matched', {}); toast(`${n}件を承認しました`); renderDevices();
+  });
+  $pane.querySelectorAll('[data-dev]').forEach(el => {
+    el.querySelector('[data-approve]')?.addEventListener('click', async () => {
+      const mid = el.querySelector('[data-member]').value;
+      if (!mid) return toast('名簿の誰かを選んでください', true);
+      await rpc('admin_approve', { p_device_id: el.dataset.dev, p_member_id: mid }); toast('承認しました'); renderDevices();
+    });
+    el.querySelector('[data-remove]')?.addEventListener('click', async () => {
+      if (!confirm('この端末を外します。その端末では合宿の案内が見られなくなります。')) return;
+      await rpc('admin_remove_device', { p_device_id: el.dataset.dev }); renderDevices();
+    });
+  });
+}
+
+// ===== 進行 =====
+// 場面が変わったときだけ全体を描き直し、同じ場面の間は「いまの様子」だけを書き換える（入力中の文字を消さないため）
+let renderedScene = null;
+async function renderLive() {
+  if (renderedScene === live.scene && document.getElementById('now-box')) return refreshStatus();
+  renderedScene = live.scene;
+  const p = live.payload || {};
+  const [awards, reveals, qs] = await Promise.all([
+    rpc('admin_list', { tbl: 'awards' }), rpc('admin_list', { tbl: 'reveals' }), rpc('admin_list', { tbl: 'quiz_questions' }),
+  ]);
+  awards.sort((a, b) => a.sort - b.sort); reveals.sort((a, b) => a.sort - b.sort);
+  const nq = qs.length;
+
+  $pane.innerHTML = `
+    <section class="ecard now-box"><div class="label">いまの場面</div><div class="big">${SCENE[live.scene]}</div>
+      <div id="now-box"></div>
+      <button class="btn" data-act="idle">待機に戻す（参加者はホームに戻れます）</button></section>
+
+    <section class="ecard"><h3>ワーク</h3>
+      <label>お題<input id="w-title" value="${live.scene === 'work' ? esc(p.title) : ''}"></label>
+      <label>説明（任意）<textarea id="w-body" rows="3">${live.scene === 'work' ? esc(p.body) : ''}</textarea></label>
+      <label>時間（分、空ならタイマーなし）<input id="w-min" type="number" value="15"></label>
+      <button class="btn primary" data-act="work">お題を全員に出す</button></section>
+
+    <section class="ecard"><h3>表彰</h3><p class="sub">押すと全員の画面に「受賞者は……」と5秒溜めてから名前が出ます。中身は「表彰」タブで入れます。</p>
+      ${awards.map(a => `<div class="present"><span>${a.revealed ? '✅' : '・'} ${esc(a.category)}（${esc(a.winner) || '受賞者未入力'}）</span><button class="btn primary small" data-present="award" data-id="${a.id}">発表</button></div>`).join('') || '<p class="sub">まだ登録がありません</p>'}</section>
+
+    <section class="ecard"><h3>重大発表</h3><p class="sub">押すと全員の画面が暗転し、5秒のカウントダウンのあとに出ます。</p>
+      ${reveals.map(v => `<div class="present"><span>${v.revealed ? '✅' : '・'} ${esc(v.title)}</span><button class="btn primary small" data-present="reveal" data-id="${v.id}">発表</button></div>`).join('') || '<p class="sub">まだ登録がありません</p>'}</section>
+
+    <section class="ecard"><h3>クイズ（全${nq}問）</h3><p class="sub">参加登録した全員が答えると自動で次へ進みます。止まったら「次へ進める」を押します。</p>
+      <div class="row-btns"><button class="btn primary" data-act="quiz-start">最初から始める</button>
+      <button class="btn" data-act="quiz-next" ${live.scene === 'quiz' && p.phase === 'answering' ? '' : 'disabled'}>次へ進める</button>
+      <button class="btn" data-act="quiz-finish" ${live.scene === 'quiz' ? '' : 'disabled'}>結果を出す</button></div></section>
+
+    <section class="ecard"><h3>早押し</h3>
+      <label>問題（任意。口頭で出すなら空でよい）<input id="b-q"></label>
+      <div class="row-btns"><button class="btn primary" data-act="buzz-new">新しい問題で受付開始</button>
+      <button class="btn" data-act="buzz-close" ${live.scene === 'buzz' && p.open ? '' : 'disabled'}>締め切る</button></div></section>
+
+    <section class="ecard"><h3>ビンゴ</h3>
+      <div class="row-btns"><button class="btn primary" data-act="bingo-start">新しいカードで始める</button>
+      <button class="btn primary" data-act="bingo-draw" ${live.scene === 'bingo' ? '' : 'disabled'}>番号を引く</button></div></section>`;
+
+  $pane.querySelectorAll('[data-act]').forEach(b => b.onclick = () => act(b.dataset.act, live.payload || {}, nq));
+  $pane.querySelectorAll('[data-present]').forEach(b => b.onclick = async () => {
+    if (!confirm('全員の画面に発表します。よろしいですか？')) return;
+    await rpc('admin_present', { p_kind: b.dataset.present, p_id: b.dataset.id, p_delay_sec: 5 });
+    renderedScene = null;
+  });
+  refreshStatus();
+}
+
+// 場面ごとの「いまの様子」
+function refreshStatus() {
+  const p = live.payload || {}, el = document.getElementById('now-box');
+  if (!el) return;
+  let status = '';
+  if (live.scene === 'quiz') {
+    status = p.phase === 'finished' ? '全問終わりました。参加者とスクリーンに結果が出ています。'
+      : `Q${p.q} / ${p.total}　回答 ${live.quiz?.answered ?? 0} / ${live.joined} 人`;
+  } else if (live.scene === 'buzz') {
+    status = `第${p.round}問（${p.open ? '受付中' : '締め切り'}）　` + ((live.buzz || []).map((b, i) => `${i + 1}番 ${esc(b.name)}`).join('、') || 'まだ誰も押していません');
+  } else if (live.scene === 'bingo') {
+    status = `出た番号（${(p.numbers || []).length}個）：${(p.numbers || []).join('、') || 'まだありません'}<br>ビンゴの人：${(live.bingo_winners || []).map(esc).join('、') || 'まだいません'}`;
+  } else if (live.scene === 'work') status = `お題：${esc(p.title)}`;
+  else if (live.scene === 'award') status = `${esc(p.category)}${p.winner !== undefined ? '：' + esc(p.winner) : '（発表の溜め中）'}`;
+  else if (live.scene === 'reveal') status = p.title !== undefined ? esc(p.title) : '（発表の溜め中）';
+  el.innerHTML = `<div>${status}</div><div class="sub">参加者 ${live.joined} 人（承認済み）</div>`;
+  // 場面に応じてボタンの押せる・押せないを切り替える
+  const dis = (act, off) => { const b = $pane.querySelector(`[data-act="${act}"]`); if (b) b.disabled = off; };
+  dis('quiz-next', !(live.scene === 'quiz' && p.phase === 'answering'));
+  dis('quiz-finish', live.scene !== 'quiz');
+  dis('buzz-close', !(live.scene === 'buzz' && p.open));
+  dis('bingo-draw', live.scene !== 'bingo');
+}
+
+async function act(a, p, nq) {
+  const set = (scene, payload) => rpc('admin_set_live', { p_scene: scene, p_payload: payload });
+  switch (a) {
+    case 'idle': return set('idle', {});
+    case 'work': {
+      const min = Number(document.getElementById('w-min').value);
+      return set('work', { title: document.getElementById('w-title').value, body: document.getElementById('w-body').value,
+        ends_at: min > 0 ? new Date(Date.now() + min * 60000).toISOString() : null });
+    }
+    case 'quiz-start':
+      if (!nq) return toast('クイズの問題がありません', true);
+      if (!confirm('これまでの回答を消して、Q1から始めます。よろしいですか？')) return;
+      await rpc('admin_reset', { what: 'quiz' });
+      return set('quiz', { q: 1, phase: 'answering', total: nq });
+    case 'quiz-next':
+      return set('quiz', p.q >= p.total ? { ...p, phase: 'finished' } : { ...p, q: p.q + 1, phase: 'answering' });
+    case 'quiz-finish': return set('quiz', { ...p, phase: 'finished' });
+    case 'buzz-new':
+      return set('buzz', { round: (live.scene === 'buzz' ? p.round : 0) + 1, open: true, question: document.getElementById('b-q').value });
+    case 'buzz-close': return set('buzz', { ...p, open: false });
+    case 'bingo-start':
+      if (!confirm('新しいカードでビンゴを始めます。よろしいですか？')) return;
+      return set('bingo', { seed: Date.now(), numbers: [], started_at: new Date().toISOString() });
+    case 'bingo-draw': {
+      const left = Array.from({ length: 75 }, (_, i) => i + 1).filter(n => !p.numbers.includes(n));
+      if (!left.length) return toast('すべての番号が出ました');
+      return set('bingo', { ...p, numbers: [...p.numbers, left[Math.floor(Math.random() * left.length)]] });
+    }
+  }
+}
+
+// ===== 設定 =====
+function renderConfig() {
+  $pane.innerHTML = `<h2>設定</h2>
+    <section class="ecard"><h3>参加者に配るリンク</h3><p><a href="${LIFF_URL}" target="_blank">${LIFF_URL}</a></p>
+      <p class="sub">LINE公式アカウントのリッチメニューやメッセージにこのリンクを置きます。</p></section>
+    <section class="ecard"><h3>運営パスコードを変える</h3><p class="sub">変えたら、新しいパスコードを運営陣に共有してください。</p>
+      <input id="newpass" type="password" class="input" placeholder="新しいパスコード（12文字以上）"><button class="btn primary" id="chg">変える</button></section>
+    <section class="ecard"><h3>リハーサルのあとに記録を消す</h3><p class="sub">本番の前に、リハーサルで残った記録を消します。中身（日程・しおり・表彰など）は消えません。</p>
+      <div class="row-btns"><button class="btn danger" data-reset="quiz">クイズの回答</button><button class="btn danger" data-reset="buzz">早押しの記録</button>
+      <button class="btn danger" data-reset="reactions">リアクション・ビンゴ</button><button class="btn danger" data-reset="present">表彰・重大発表の「発表済み」</button></div></section>
+    <section class="ecard"><h3>合宿が終わったら：社員の情報と伏せていた中身をすべて消す</h3>
+      <p class="sub">名簿・参加者の端末・表彰・重大発表・お知らせ・クイズの回答などを消します。日程・しおり・クイズの問題は残ります。元に戻せません。</p>
+      <input id="wipe-text" class="input" placeholder="確認のため「すべて消す」と入力"><button class="btn danger" id="wipe">すべて消す</button></section>`;
+  document.getElementById('chg').onclick = async () => {
+    const nc = document.getElementById('newpass').value;
+    await rpc('admin_change_passcode', { new_code: nc });
+    code = nc; sessionStorage.setItem('adm_code', nc); toast('パスコードを変えました');
+  };
+  document.getElementById('wipe').onclick = async () => {
+    await rpc('admin_wipe_all', { confirm_text: document.getElementById('wipe-text').value });
+    toast('すべて消しました');
+  };
+  $pane.querySelectorAll('[data-reset]').forEach(b => b.onclick = async () => {
+    if (!confirm(`「${b.textContent}」を消します。元に戻せません。よろしいですか？`)) return;
+    await rpc('admin_reset', { what: b.dataset.reset }); toast('消しました');
+  });
+}
+</script>
+</body>
+</html>
