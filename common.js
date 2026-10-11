@@ -24,27 +24,45 @@ function esc(s) {
 // 改行を残して表示する
 const escBr = s => esc(s).replace(/\n/g, '<br>');
 
-const WEEK = ['日', '月', '火', '水', '木', '金', '土'];
-function fmtDate(d) {
-  const [y, m, day] = d.split('-').map(Number);
-  const w = WEEK[new Date(y, m - 1, day).getDay()];
-  return `${m}/${day}（${w}）`;
-}
-const hhmm = t => (t || '').slice(0, 5);
+// クイズの4択：色と形（色だけに頼らず形でも見分けられるようにする）
+const SHAPES = [
+  { name: 'さんかく', color: '#E5322D', svg: '<svg viewBox="0 0 40 40"><path d="M20 5 L36 34 H4 Z"/></svg>' },
+  { name: 'ひしがた', color: '#1B6FD8', svg: '<svg viewBox="0 0 40 40"><path d="M20 3 L37 20 L20 37 L3 20 Z"/></svg>' },
+  { name: 'まる', color: '#E6A100', svg: '<svg viewBox="0 0 40 40"><circle cx="20" cy="20" r="16"/></svg>' },
+  { name: 'しかく', color: '#1E9E54', svg: '<svg viewBox="0 0 40 40"><rect x="5" y="5" width="30" height="30" rx="3"/></svg>' },
+];
 
-// 日程を日付ごとにまとめ、いま進行中の行に印を付ける
-function groupSchedule(items, now = new Date()) {
-  const sorted = [...items].sort((a, b) => (a.date + a.start_time).localeCompare(b.date + b.start_time));
-  const groups = [];
-  for (const it of sorted) {
-    const start = new Date(`${it.date}T${hhmm(it.start_time)}:00`);
-    const end = it.end_time ? new Date(`${it.date}T${hhmm(it.end_time)}:00`) : new Date(start.getTime() + 30 * 60000);
-    const row = { ...it, isNow: now >= start && now < end };
-    let g = groups.find(x => x.date === it.date);
-    if (!g) groups.push(g = { date: it.date, items: [] });
-    g.items.push(row);
+// 紙吹雪（発表・ビンゴ・1位のとき）
+function confetti(n = 80) {
+  const box = document.createElement('div');
+  box.className = 'confetti';
+  const colors = ['#F23C08', '#FFB703', '#1B6FD8', '#1E9E54', '#E5322D', '#ffffff'];
+  for (let i = 0; i < n; i++) {
+    const c = document.createElement('i');
+    c.style.left = Math.random() * 100 + '%';
+    c.style.background = colors[i % colors.length];
+    c.style.animationDelay = Math.random() * 0.8 + 's';
+    c.style.animationDuration = 2.2 + Math.random() * 1.6 + 's';
+    c.style.transform = `rotate(${Math.random() * 360}deg)`;
+    box.appendChild(c);
   }
-  return groups;
+  document.body.appendChild(box);
+  setTimeout(() => box.remove(), 4500);
+}
+
+// 数字を0から数え上げて見せる
+function countUp(el, to, ms = 900) {
+  const t0 = performance.now();
+  const step = t => { const k = Math.min(1, (t - t0) / ms); el.textContent = Math.round(to * (1 - Math.pow(1 - k, 3))).toLocaleString(); if (k < 1) requestAnimationFrame(step); };
+  requestAnimationFrame(step);
+}
+
+// 表彰台（上位3人。並びは 2位・1位・3位）
+function podiumHtml(rank) {
+  const top = [rank[1], rank[0], rank[2]];
+  const cls = ['p2', 'p1', 'p3'], no = [2, 1, 3];
+  return `<div class="podium">${top.map((r, i) => r ? `<div class="pod ${cls[i]}"><div class="pod-name">${esc(r.name)}</div>
+    <div class="pod-score">${r.score.toLocaleString()}点</div><div class="pod-bar"><span>${no[i]}</span></div></div>` : '<div class="pod"></div>').join('')}</div>`;
 }
 
 // 発表までの残り秒（表彰・重大発表の溜め）

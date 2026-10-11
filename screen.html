@@ -4,26 +4,28 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
-<title>合宿アプリ スクリーン</title>
+<title>合宿あそび スクリーン</title>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
 <script src="common.js"></script>
 <link rel="stylesheet" href="style.css">
 </head>
 <body class="screen">
-<main id="sc"></main>
+<main id="sc" class="sc"></main>
 <div id="float"></div>
 <script>
 // 会場のプロジェクターに全画面で映す（F11）。開くときに運営パスコードを入れる。操作はしない。
 let code = sessionStorage.getItem('adm_code') || '';
-let data = { settings: {}, schedule: [] };
+let title = '合宿あそび';
 let live = { scene: 'idle', payload: {} };
 let tick = null;
+let lastFx = '';
 const $sc = document.getElementById('sc');
+const show = (html, cls = '') => { $sc.className = 'sc ' + cls; $sc.innerHTML = html; };
+const fx = (id, f) => { if (lastFx !== id) { lastFx = id; f(); } };
 
 function renderLogin(msg = '') {
-  $sc.innerHTML = `<div class="sc-center"><div class="sc-kind">スクリーン</div>
-    <input id="pass" type="password" class="input" style="max-width:420px" placeholder="運営パスコード">
-    <button class="btn primary" id="go">表示する</button><div class="sc-note">${esc(msg)}</div></div>`;
+  show(`<div class="sc-kind">SCREEN</div><input id="pass" type="password" class="input" style="max-width:420px" placeholder="運営パスコード">
+    <button class="btn primary" id="go">表示する</button><div class="sc-sub">${esc(msg)}</div>`);
   const go = async () => {
     const c = document.getElementById('pass').value;
     if (!(await call('admin_check', { code: c }).catch(() => false))) return renderLogin('パスコードが違います');
@@ -33,109 +35,112 @@ function renderLogin(msg = '') {
   document.getElementById('pass').onkeydown = e => { if (e.key === 'Enter') go(); };
 }
 
-async function loadAll() { data = await call('view_all', { p_key: code }); setLive(data.live); }
+async function loadAll() { const v = await call('view_all', { p_key: code }); title = v.title || title; setLive(v.live, true); }
 async function refreshLive() { try { setLive(await call('live_view', { p_key: code })); } catch (e) {} }
-function setLive(next) {
+function setLive(next, force) {
   syncClock(next.server_now);
   const same = JSON.stringify({ ...live, server_now: 0 }) === JSON.stringify({ ...next, server_now: 0 });
   live = next;
-  if (!same) render();
+  if (!same || force) render();
 }
 
 async function start() {
   try { await loadAll(); } catch (e) { sessionStorage.removeItem('adm_code'); return renderLogin(e.message); }
-  render();
-  const reloadAll = debounce(() => loadAll().catch(() => {}), 500);
-  const reloadLive = debounce(refreshLive, 200);
+  const reloadAll = debounce(() => loadAll().catch(() => {}), 400);
+  const reloadLive = debounce(refreshLive, 150);
   onPulse((topic, info) => {
-    if (topic === 'react') { floatEmoji(info.kind); if (info.kind === 'bingo') reloadLive(); }
+    if (topic === 'react') { floatEmoji(info.kind); if (info.kind === 'bingo' || info.kind === 'reach') reloadLive(); }
     else if (topic === 'content' || topic === 'poll') reloadAll();
     else reloadLive();
   });
-  setInterval(() => { if (live.scene === 'idle') render(); }, 60000);
 }
 
 function render() {
-  clearInterval(tick); tick = null;
+  clearInterval(tick); clearTimeout(tick); tick = null;
   const p = live.payload || {};
   switch (live.scene) {
-    case 'idle': {
-      const now = groupSchedule(data.schedule || []).flatMap(g => g.items).find(i => i.isNow);
-      $sc.innerHTML = `<div class="sc-center"><div class="sc-title">${esc(data.settings?.title)}</div>
-        ${now ? `<div class="sc-sub">いま：${esc(now.title)}（${hhmm(now.start_time)}〜${hhmm(now.end_time)}）</div>` : ''}
-        <div class="sc-note">LINE の合宿アカウントから、アプリを開いてください</div>
-        <div class="sc-note">参加者 ${live.joined} 人</div></div>`;
-      break;
-    }
-    case 'work': {
-      const draw = () => {
-        const left = p.ends_at ? secondsUntil(p.ends_at) : null;
-        $sc.innerHTML = `<div class="sc-center"><div class="sc-kind">ワーク</div><div class="sc-title">${esc(p.title)}</div>
-          ${p.body ? `<div class="sc-sub">${escBr(p.body)}</div>` : ''}
-          ${left !== null ? `<div class="sc-timer ${left === 0 ? 'over' : ''}">${left === 0 ? '時間です' : `${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`}</div>` : ''}</div>`;
-      };
-      draw(); if (p.ends_at) tick = setInterval(draw, 1000);
-      break;
-    }
-    case 'award':
-    case 'reveal': {
-      const isAward = live.scene === 'award';
-      // 運営パスコードで読んでいても、発表の時刻までは中身が届かない
-      const hasContent = isAward ? p.winner !== undefined : p.title !== undefined;
-      const draw = () => {
-        const left = secondsUntil(p.show_at);
-        if (left > 0 || !hasContent) {
-          $sc.innerHTML = `<div class="sc-center dark"><div class="sc-kind">${isAward ? '表彰' : '重大発表'}</div>
-            ${isAward ? `<div class="sc-title">${esc(p.category)}</div><div class="sc-sub">受賞者は……</div>` : '<div class="sc-sub">まもなく発表します</div>'}
-            <div class="sc-count">${left || '…'}</div></div>`;
-          if (left === 0) { clearInterval(tick); tick = null; setTimeout(refreshLive, 300); }
-        } else {
-          clearInterval(tick); tick = null;
-          $sc.innerHTML = `<div class="sc-center open"><div class="sc-kind">${isAward ? esc(p.category) : '重大発表'}</div>
-            <div class="sc-winner">${esc(isAward ? p.winner : p.title)}</div>
-            <div class="sc-sub">${escBr(isAward ? p.comment : p.body)}</div></div>`;
-        }
-      };
-      draw(); if (secondsUntil(p.show_at) > 0) tick = setInterval(draw, 250);
-      break;
-    }
-    case 'quiz': {
-      const q = live.quiz || {};
-      if (p.phase === 'finished') {
-        $sc.innerHTML = `<div class="sc-center"><div class="sc-kind">クイズ 結果発表</div>
-          <ol class="sc-rank">${(q.ranking || []).slice(0, 10).map((r, i) => `<li><span>${i + 1}位　${esc(r.name)}</span><span>${r.score}問</span></li>`).join('')}</ol></div>`;
-        break;
-      }
-      $sc.innerHTML = `<div class="sc-center"><div class="sc-kind">クイズ　Q${p.q} / ${p.total}</div>
-        <div class="sc-title">${esc(q.question_text)}</div>
-        <div class="sc-choices">${(q.choices || []).map((c, i) => `<div>${'ABCDEFG'[i]}．${esc(c)}</div>`).join('')}</div>
-        <div class="sc-sub">回答 ${q.answered ?? 0} / ${live.joined} 人</div>
-        <div class="sc-bar"><div style="width:${live.joined ? (q.answered || 0) / live.joined * 100 : 0}%"></div></div></div>`;
-      break;
-    }
+    case 'quiz': return renderQuiz(p, live.quiz || {});
     case 'buzz': {
       const bz = live.buzz || [];
-      $sc.innerHTML = `<div class="sc-center"><div class="sc-kind">早押し　第${p.round}問${p.open ? '' : '（締め切り）'}</div>
+      show(`<div class="sc-kind">早押し　第${p.round}問${p.open ? '' : '（締め切り）'}</div>
         ${p.question ? `<div class="sc-title">${esc(p.question)}</div>` : ''}
         ${bz.length ? `<div class="sc-winner">${esc(bz[0].name)}</div>
-          <ol class="sc-rank">${bz.slice(1, 5).map((b, i) => `<li><span>${i + 2}番　${esc(b.name)}</span></li>`).join('')}</ol>`
-          : '<div class="sc-sub">スマホの「押す！」で回答</div>'}</div>`;
-      break;
+          <ol class="sc-board">${bz.slice(1, 5).map((b, i) => `<li><span><b>${i + 2}</b>${esc(b.name)}</span></li>`).join('')}</ol>`
+          : '<div class="sc-sub">スマホの「押す！」で回答</div>'}`);
+      if (bz.length) fx(`buzz-${p.round}`, () => confetti(60));
+      return;
     }
     case 'bingo': {
       const nums = p.numbers || [], winners = live.bingo_winners || [];
-      $sc.innerHTML = `<div class="sc-center"><div class="sc-kind">ビンゴ</div>
+      show(`<div class="sc-kind">BINGO　${nums.length}個目　リーチ ${live.reach ?? 0}人</div>
         <div class="sc-ball">${nums[nums.length - 1] ?? '–'}</div>
         <div class="sc-nums">${Array.from({ length: 75 }, (_, i) => `<span class="${nums.includes(i + 1) ? 'hit' : ''}">${i + 1}</span>`).join('')}</div>
-        ${winners.length ? `<div class="sc-sub">ビンゴ！ ${winners.map(esc).join('、')}</div>` : ''}</div>`;
-      break;
+        ${winners.length ? `<div class="sc-title">BINGO！ ${winners.map(esc).join('、')}</div>` : ''}`);
+      if (winners.length) fx(`bingo-${winners.length}-${p.seed}`, () => confetti(120));
+      return;
+    }
+    case 'award': case 'reveal': return renderStage(p);
+    default: {
+      const names = live.names || [];
+      show(`<div class="sc-kind">STAND BY</div><div class="sc-title">${esc(title)}</div>
+        <div><div class="sc-count">${live.joined ?? 0}</div><div class="sc-sub">人が参加中</div></div>
+        <div class="sc-names">${names.slice(0, 60).map(n => `<span>${esc(n)}</span>`).join('')}</div>
+        <div class="sc-join">LINE の合宿アカウントから「合宿あそび」を開いて参加</div>`);
     }
   }
 }
 
+function renderQuiz(p, q) {
+  if (p.phase === 'finished') {
+    const rank = q.ranking || [];
+    show(`<div class="sc-kind">RESULT</div><div class="sc-title">結果発表</div>${podiumHtml(rank)}
+      <ol class="sc-board" style="width:50vw">${rank.slice(3, 8).map((r, i) => `<li><span><b>${i + 4}</b>${esc(r.name)}</span><span>${r.score.toLocaleString()}点</span></li>`).join('')}</ol>`);
+    fx('quiz-finished', () => setTimeout(() => confetti(150), 1200));
+    return;
+  }
+  const reveal = p.phase === 'reveal';
+  const dist = q.dist || [];
+  const tiles = (q.choices || []).map((c, i) => { const s = SHAPES[i];
+    const cls = reveal ? (i === q.correct_index ? 'correct' : 'dim') : '';
+    return `<div class="sc-ans ${cls}" style="background:${s.color}">${s.svg}<span>${esc(c)}</span>${reveal ? `<span class="n">${dist[i] ?? 0}</span>` : ''}</div>`; }).join('');
+  if (!reveal) {
+    const pct = live.joined ? Math.round(q.answered / live.joined * 100) : 0;
+    show(`<div class="sc-meter"><div class="ring" style="--p:${pct}"><div>${q.answered}/${live.joined}</div></div></div>
+      <div class="sc-kind">QUIZ　Q${p.q} / ${p.total}</div><div class="sc-title">${esc(q.question_text)}</div>
+      <div class="sc-answers">${tiles}</div><div class="sc-sub">スマホで色と形を選んでください</div>`);
+    return;
+  }
+  const top = (q.ranking || []).slice(0, 5);
+  show(`<div class="sc-kind">QUIZ　Q${p.q} / ${p.total}　正解発表</div><div class="sc-title" style="font-size:4.6vh">${esc(q.question_text)}</div>
+    <div class="sc-answers">${tiles}</div>
+    <ol class="sc-board">${top.map((r, i) => `<li><span><b>${i + 1}</b>${esc(r.name)}</span><span>${r.score.toLocaleString()}点</span></li>`).join('')}</ol>`);
+  if (p.next_at) tick = setTimeout(refreshLive, Math.max(500, secondsUntil(p.next_at) * 1000 + 300));
+}
+
+function renderStage(p) {
+  const isAward = live.scene === 'award';
+  const hasContent = isAward ? p.winner !== undefined : p.title !== undefined;
+  const draw = () => {
+    const left = secondsUntil(p.show_at);
+    if (left > 0 || !hasContent) {
+      show(`<div class="sc-kind">${isAward ? 'AWARD' : 'ANNOUNCEMENT'}</div>
+        ${isAward ? `<div class="sc-title">${esc(p.category)}</div><div class="sc-sub drum">受賞者は…… ドゥルルルル</div>` : '<div class="sc-sub drum">重大発表があります</div>'}
+        <div class="sc-big-count">${left || '…'}</div>`, 'dark');
+      if (left === 0) { clearInterval(tick); tick = null; setTimeout(refreshLive, 300); }
+    } else {
+      clearInterval(tick); tick = null;
+      show(`<div class="sc-kind">${isAward ? esc(p.category) : 'ANNOUNCEMENT'}</div>
+        <div class="sc-winner">${esc(isAward ? p.winner : p.title)}</div>
+        <div class="sc-sub">${escBr(isAward ? p.comment : p.body)}</div>`, 'dark');
+      fx(`stage-${p.id}-${p.show_at}`, () => confetti(160));
+    }
+  };
+  draw(); if (secondsUntil(p.show_at) > 0) tick = setInterval(draw, 250);
+}
+
 // リアクションを画面に流す
 function floatEmoji(kind) {
-  if (!kind) return;
+  if (!kind || kind === 'reach') return;
   const el = document.createElement('div');
   el.className = 'fl';
   el.textContent = kind === 'bingo' ? '🎯' : reactionEmoji(kind);

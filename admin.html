@@ -61,20 +61,8 @@ if (code) login(code);
 
 // ===== 編集する表の定義（タブ = 1つの表） =====
 const TABLES = {
-  settings: { label: '基本情報', single: true, note: '参加者のホーム画面の一番上に出ます。', fields: [
-    { k: 'title', label: '合宿の名前' }, { k: 'period_text', label: '日程（表示用）' }, { k: 'venue', label: '会場' },
-    { k: 'message', label: 'ひとこと（ホームに表示）', type: 'textarea' }] },
-  schedule_items: { label: '日程', note: '参加者のホームに日付ごとに並びます。いまの時間帯には「いま」の印が付きます。',
-    sort: (a, b) => (a.date + a.start_time).localeCompare(b.date + b.start_time),
-    fields: [{ k: 'date', label: '日付', type: 'date' }, { k: 'start_time', label: '開始', type: 'time' }, { k: 'end_time', label: '終了', type: 'time' },
-      { k: 'title', label: '内容' }, { k: 'place', label: '場所' }, { k: 'note', label: 'メモ（持ち物など）', type: 'textarea' }],
-    blank: () => ({ date: '2027-01-08', start_time: '09:00' }) },
-  guide_pages: { label: 'しおり', note: '参加者の「しおり」タブに、並び順の小さい順に出ます。',
-    sort: (a, b) => a.sort - b.sort,
-    fields: [{ k: 'title', label: '見出し' }, { k: 'body', label: '本文', type: 'textarea', rows: 6 }, { k: 'sort', label: '並び順', type: 'number' }] },
-  notices: { label: 'お知らせ', note: '追加するとすぐに参加者のホームの上に出ます（新しい順に10件）。',
-    sort: (a, b) => b.created_at.localeCompare(a.created_at),
-    fields: [{ k: 'body', label: 'お知らせの文面', type: 'textarea' }] },
+  settings: { label: '基本情報', single: true, note: 'アプリの名前は、参加者の画面の左上とスクリーンの待機画面に出ます。班と部屋は、公開にすると参加者が自分の呼び名をタップしたときに見えます（2日目に発表したいときは、それまで公開にしない）。', fields: [
+    { k: 'title', label: 'アプリの名前' }, { k: 'show_profile', label: '班と部屋を参加者に公開する', type: 'checkbox' }] },
   members: { label: '名簿', note: '会社の情報を外に出さないため、名前は<b>ひらがなの下の名前かニックネーム</b>で入れます（例：れいや）。名字・漢字の氏名・社名は入れません。同じ呼び名の人がいたら「れいや2」のように分けます。参加者には、ここに入れた呼び名で申請してもらいます。',
     sort: (a, b) => a.sort - b.sort || a.name.localeCompare(b.name, 'ja'), bulk: true,
     fields: [{ k: 'name', label: '呼び名（ひらがな・ニックネーム）' }, { k: 'team', label: '班' }, { k: 'room', label: '部屋' }, { k: 'sort', label: '並び順', type: 'number' }] },
@@ -106,7 +94,7 @@ function init() {
     if (topic !== 'content') reload();
   });
 }
-const SCENE = { idle: '待機中', work: 'ワーク', award: '表彰', reveal: '重大発表', quiz: 'クイズ', buzz: '早押し', bingo: 'ビンゴ' };
+const SCENE = { idle: '待機中', award: '表彰', reveal: '重大発表', quiz: 'クイズ', buzz: '早押し', bingo: 'ビンゴ' };
 function showScene() { document.getElementById('now-scene').textContent = `いまの場面：${SCENE[live.scene]}`; }
 
 function setTab(t) {
@@ -120,7 +108,8 @@ function setTab(t) {
 
 // ===== 表の編集（どの表も同じ作り） =====
 function fieldHtml(f, v) {
-  const val = f.type === 'lines' ? (v || []).join('\n') : f.offset ? (v ?? 0) + f.offset : f.type === 'time' ? hhmm(v) : (v ?? '');
+  if (f.type === 'checkbox') return `<label class="check"><input data-k="${f.k}" type="checkbox" ${v ? 'checked' : ''}>${f.label}</label>`;
+  const val = f.type === 'lines' ? (v || []).join('\n') : f.offset ? (v ?? 0) + f.offset : (v ?? '');
   if (f.type === 'textarea' || f.type === 'lines') return `<label>${f.label}<textarea data-k="${f.k}" rows="${f.rows || (f.type === 'lines' ? 4 : 3)}">${esc(val)}</textarea></label>`;
   return `<label>${f.label}<input data-k="${f.k}" type="${f.type || 'text'}" value="${esc(val)}"></label>`;
 }
@@ -129,9 +118,9 @@ function readRow(card, def) {
   for (const f of def.fields) {
     const el = card.querySelector(`[data-k="${f.k}"]`);
     let v = el.value;
-    if (f.type === 'lines') v = v.split('\n').map(s => s.trim()).filter(Boolean);
+    if (f.type === 'checkbox') v = el.checked;
+    else if (f.type === 'lines') v = v.split('\n').map(s => s.trim()).filter(Boolean);
     else if (f.type === 'number') v = v === '' ? 0 : Number(v) - (f.offset || 0);
-    else if ((f.type === 'time' || f.type === 'date') && v === '') v = null;
     row[f.k] = v;
   }
   return row;
@@ -236,13 +225,7 @@ async function renderLive() {
   $pane.innerHTML = `
     <section class="ecard now-box"><div class="label">いまの場面</div><div class="big">${SCENE[live.scene]}</div>
       <div id="now-box"></div>
-      <button class="btn" data-act="idle">待機に戻す（参加者はホームに戻れます）</button></section>
-
-    <section class="ecard"><h3>ワーク</h3>
-      <label>お題<input id="w-title" value="${live.scene === 'work' ? esc(p.title) : ''}"></label>
-      <label>説明（任意）<textarea id="w-body" rows="3">${live.scene === 'work' ? esc(p.body) : ''}</textarea></label>
-      <label>時間（分、空ならタイマーなし）<input id="w-min" type="number" value="15"></label>
-      <button class="btn primary" data-act="work">お題を全員に出す</button></section>
+      <button class="btn" data-act="idle">待機に戻す（参加者の画面は「まもなく始まります」になります）</button></section>
 
     <section class="ecard"><h3>表彰</h3><p class="sub">押すと全員の画面に「受賞者は……」と5秒溜めてから名前が出ます。中身は「表彰」タブで入れます。</p>
       ${awards.map(a => `<div class="present"><span>${a.revealed ? '✅' : '・'} ${esc(a.category)}（${esc(a.winner) || '受賞者未入力'}）</span><button class="btn primary small" data-present="award" data-id="${a.id}">発表</button></div>`).join('') || '<p class="sub">まだ登録がありません</p>'}</section>
@@ -250,9 +233,9 @@ async function renderLive() {
     <section class="ecard"><h3>重大発表</h3><p class="sub">押すと全員の画面が暗転し、5秒のカウントダウンのあとに出ます。</p>
       ${reveals.map(v => `<div class="present"><span>${v.revealed ? '✅' : '・'} ${esc(v.title)}</span><button class="btn primary small" data-present="reveal" data-id="${v.id}">発表</button></div>`).join('') || '<p class="sub">まだ登録がありません</p>'}</section>
 
-    <section class="ecard"><h3>クイズ（全${nq}問）</h3><p class="sub">参加登録した全員が答えると自動で次へ進みます。止まったら「次へ進める」を押します。</p>
+    <section class="ecard"><h3>クイズ（全${nq}問）</h3><p class="sub">全員が答えると正解発表（答えの分布と上位5人）を7秒見せ、自動で次の問題へ進みます。早く正解するほど点が高くなります（最大1000点）。答えない人がいて止まったら「次へ進める」を押します。</p>
       <div class="row-btns"><button class="btn primary" data-act="quiz-start">最初から始める</button>
-      <button class="btn" data-act="quiz-next" ${live.scene === 'quiz' && p.phase === 'answering' ? '' : 'disabled'}>次へ進める</button>
+      <button class="btn" data-act="quiz-next" ${live.scene === 'quiz' && p.phase !== 'finished' ? '' : 'disabled'}>次へ進める</button>
       <button class="btn" data-act="quiz-finish" ${live.scene === 'quiz' ? '' : 'disabled'}>結果を出す</button></div></section>
 
     <section class="ecard"><h3>早押し</h3>
@@ -279,19 +262,20 @@ function refreshStatus() {
   if (!el) return;
   let status = '';
   if (live.scene === 'quiz') {
-    status = p.phase === 'finished' ? '全問終わりました。参加者とスクリーンに結果が出ています。'
-      : `Q${p.q} / ${p.total}　回答 ${live.quiz?.answered ?? 0} / ${live.joined} 人`;
+    status = p.phase === 'finished' ? '全問終わりました。参加者とスクリーンに表彰台が出ています。'
+      : p.phase === 'reveal' ? `Q${p.q} / ${p.total}　正解発表中（まもなく次の問題へ）`
+      : `Q${p.q} / ${p.total}　出題中　回答 ${live.quiz?.answered ?? 0} / ${live.joined} 人`;
   } else if (live.scene === 'buzz') {
     status = `第${p.round}問（${p.open ? '受付中' : '締め切り'}）　` + ((live.buzz || []).map((b, i) => `${i + 1}番 ${esc(b.name)}`).join('、') || 'まだ誰も押していません');
   } else if (live.scene === 'bingo') {
-    status = `出た番号（${(p.numbers || []).length}個）：${(p.numbers || []).join('、') || 'まだありません'}<br>ビンゴの人：${(live.bingo_winners || []).map(esc).join('、') || 'まだいません'}`;
-  } else if (live.scene === 'work') status = `お題：${esc(p.title)}`;
+    status = `出た番号（${(p.numbers || []).length}個）：${(p.numbers || []).join('、') || 'まだありません'}<br>リーチ ${live.reach ?? 0}人　ビンゴの人：${(live.bingo_winners || []).map(esc).join('、') || 'まだいません'}`;
+  }
   else if (live.scene === 'award') status = `${esc(p.category)}${p.winner !== undefined ? '：' + esc(p.winner) : '（発表の溜め中）'}`;
   else if (live.scene === 'reveal') status = p.title !== undefined ? esc(p.title) : '（発表の溜め中）';
   el.innerHTML = `<div>${status}</div><div class="sub">参加者 ${live.joined} 人（承認済み）</div>`;
   // 場面に応じてボタンの押せる・押せないを切り替える
   const dis = (act, off) => { const b = $pane.querySelector(`[data-act="${act}"]`); if (b) b.disabled = off; };
-  dis('quiz-next', !(live.scene === 'quiz' && p.phase === 'answering'));
+  dis('quiz-next', !(live.scene === 'quiz' && p.phase !== 'finished'));
   dis('quiz-finish', live.scene !== 'quiz');
   dis('buzz-close', !(live.scene === 'buzz' && p.open));
   dis('bingo-draw', live.scene !== 'bingo');
@@ -301,30 +285,19 @@ async function act(a, p, nq) {
   const set = (scene, payload) => rpc('admin_set_live', { p_scene: scene, p_payload: payload });
   switch (a) {
     case 'idle': return set('idle', {});
-    case 'work': {
-      const min = Number(document.getElementById('w-min').value);
-      return set('work', { title: document.getElementById('w-title').value, body: document.getElementById('w-body').value,
-        ends_at: min > 0 ? new Date(Date.now() + min * 60000).toISOString() : null });
-    }
     case 'quiz-start':
       if (!nq) return toast('クイズの問題がありません', true);
-      if (!confirm('これまでの回答を消して、Q1から始めます。よろしいですか？')) return;
-      await rpc('admin_reset', { what: 'quiz' });
-      return set('quiz', { q: 1, phase: 'answering', total: nq });
-    case 'quiz-next':
-      return set('quiz', p.q >= p.total ? { ...p, phase: 'finished' } : { ...p, q: p.q + 1, phase: 'answering' });
-    case 'quiz-finish': return set('quiz', { ...p, phase: 'finished' });
+      if (!confirm('これまでの回答を消して、1問目から始めます。よろしいですか？')) return;
+      return rpc('admin_quiz', { p_action: 'start' });
+    case 'quiz-next': return rpc('admin_quiz', { p_action: 'next' });
+    case 'quiz-finish': return rpc('admin_quiz', { p_action: 'finish' });
     case 'buzz-new':
       return set('buzz', { round: (live.scene === 'buzz' ? p.round : 0) + 1, open: true, question: document.getElementById('b-q').value });
     case 'buzz-close': return set('buzz', { ...p, open: false });
     case 'bingo-start':
       if (!confirm('新しいカードでビンゴを始めます。よろしいですか？')) return;
-      return set('bingo', { seed: Date.now(), numbers: [], started_at: new Date().toISOString() });
-    case 'bingo-draw': {
-      const left = Array.from({ length: 75 }, (_, i) => i + 1).filter(n => !p.numbers.includes(n));
-      if (!left.length) return toast('すべての番号が出ました');
-      return set('bingo', { ...p, numbers: [...p.numbers, left[Math.floor(Math.random() * left.length)]] });
-    }
+      return rpc('admin_bingo', { p_action: 'start' });
+    case 'bingo-draw': return rpc('admin_bingo', { p_action: 'draw' });
   }
 }
 
@@ -335,11 +308,11 @@ function renderConfig() {
       <p class="sub">LINE公式アカウントのリッチメニューやメッセージにこのリンクを置きます。</p></section>
     <section class="ecard"><h3>運営パスコードを変える</h3><p class="sub">変えたら、新しいパスコードを運営陣に共有してください。</p>
       <input id="newpass" type="password" class="input" placeholder="新しいパスコード（12文字以上）"><button class="btn primary" id="chg">変える</button></section>
-    <section class="ecard"><h3>リハーサルのあとに記録を消す</h3><p class="sub">本番の前に、リハーサルで残った記録を消します。中身（日程・しおり・表彰など）は消えません。</p>
+    <section class="ecard"><h3>リハーサルのあとに記録を消す</h3><p class="sub">本番の前に、リハーサルで残った記録を消します。中身（名簿・表彰・クイズの問題など）は消えません。</p>
       <div class="row-btns"><button class="btn danger" data-reset="quiz">クイズの回答</button><button class="btn danger" data-reset="buzz">早押しの記録</button>
       <button class="btn danger" data-reset="reactions">リアクション・ビンゴ</button><button class="btn danger" data-reset="present">表彰・重大発表の「発表済み」</button></div></section>
     <section class="ecard"><h3>合宿が終わったら：社員の情報と伏せていた中身をすべて消す</h3>
-      <p class="sub">名簿・参加者の端末・表彰・重大発表・お知らせ・クイズの回答などを消します。日程・しおり・クイズの問題は残ります。元に戻せません。</p>
+      <p class="sub">名簿・参加者の端末・表彰・重大発表・クイズの回答などを消します。クイズの問題とアプリの名前は残ります。元に戻せません。</p>
       <input id="wipe-text" class="input" placeholder="確認のため「すべて消す」と入力"><button class="btn danger" id="wipe">すべて消す</button></section>`;
   document.getElementById('chg').onclick = async () => {
     const nc = document.getElementById('newpass').value;

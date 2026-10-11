@@ -1,4 +1,4 @@
--- 年始合宿アプリ（2027-01-08〜09）Supabase スキーマ
+-- 合宿アプリ（年始合宿 2027-01-08〜09・ゲーム版）Supabase スキーマ
 -- Supabase ダッシュボードの SQL Editor に全文を貼り付けて実行する。何度実行しても壊れない。
 -- このファイルは公開リポジトリに置かれる前提で、パスワードや社員の情報を一切含めない。
 --
@@ -6,7 +6,7 @@
 -- 1. 表はすべて直接読めない。読み書きは関数だけを通す。
 -- 2. 参加者は、運営が承認した端末（端末ごとの合鍵）でしか中身を読めない。URL を知っているだけでは何も見えない。
 -- 3. 運営の操作は運営パスコードが必要。初期パスコードは SQL Editor でしか設定できない。
--- 4. 表彰の受賞者・重大発表の中身は、発表の時刻になるまで誰にも返さない。
+-- 4. 表彰の受賞者・重大発表の中身・クイズの正解は、出す時刻になるまで誰にも返さない。
 -- 5. 画面のリアルタイム更新は「変わった」という合図（中身なし）だけを配る。
 
 create extension if not exists pgcrypto with schema extensions;
@@ -19,16 +19,21 @@ create table if not exists admin_config (
 
 create table if not exists settings (
   id int primary key default 1 check (id = 1),
-  title text not null default 'FY27 Q1合宿',
-  period_text text default '2027年1月8日（金）〜9日（土）',
-  venue text default '（会場は決まり次第お知らせします）',
-  message text default ''
+  title text not null default '合宿あそび',
+  show_profile boolean not null default false  -- 班と部屋を参加者に見せるか
 );
+alter table settings add column if not exists show_profile boolean not null default false;
+alter table settings drop column if exists period_text;
+alter table settings drop column if exists venue;
+alter table settings drop column if exists message;
 insert into settings (id) values (1) on conflict (id) do nothing;
+
+-- ゲーム版では使わない表（しおり・日程・お知らせは Teams で共有する）
+drop table if exists schedule_items, guide_pages, notices cascade;
 
 create table if not exists members (
   id uuid primary key default gen_random_uuid(),
-  name text not null,
+  name text not null,              -- 呼び名（ひらがなの下の名前かニックネーム）
   team text default '',
   room text default '',
   sort int default 0
@@ -43,29 +48,6 @@ create table if not exists devices (
   line_user_id text default '',
   member_id uuid references members(id) on delete cascade,
   status text not null default 'pending' check (status in ('pending', 'approved')),
-  created_at timestamptz not null default now()
-);
-
-create table if not exists schedule_items (
-  id uuid primary key default gen_random_uuid(),
-  date date not null,
-  start_time time not null,
-  end_time time,
-  title text not null,
-  place text default '',
-  note text default ''
-);
-
-create table if not exists guide_pages (
-  id uuid primary key default gen_random_uuid(),
-  title text not null,
-  body text default '',
-  sort int default 0
-);
-
-create table if not exists notices (
-  id uuid primary key default gen_random_uuid(),
-  body text not null,
   created_at timestamptz not null default now()
 );
 
@@ -98,11 +80,13 @@ create table if not exists quiz_answers (
   member_id uuid not null references members(id) on delete cascade,
   question_order int not null,
   choice_index int not null,
+  points int not null default 0,
   answered_at timestamptz not null default now(),
   unique (member_id, question_order)
 );
+alter table quiz_answers add column if not exists points int not null default 0;
 
--- いまの場面。scene: idle / work / award / reveal / quiz / buzz / bingo
+-- いまの場面。scene: idle / award / reveal / quiz / buzz / bingo
 create table if not exists live_state (
   id int primary key default 1 check (id = 1),
   scene text not null default 'idle',
@@ -139,7 +123,7 @@ insert into pulse (topic) values ('content'), ('live'), ('quiz'), ('buzz'), ('re
 do $$
 declare t text;
 begin
-  foreach t in array array['admin_config','settings','members','devices','schedule_items','guide_pages','notices','awards','reveals',
+  foreach t in array array['admin_config','settings','members','devices','awards','reveals',
                            'quiz_questions','quiz_answers','live_state','reactions','buzzes','pulse'] loop
     execute format('alter table %I enable row level security', t);
   end loop;
@@ -166,9 +150,8 @@ do $$
 declare r record;
 begin
   for r in select * from (values
-    ('settings','content'), ('members','content'), ('devices','content'), ('schedule_items','content'),
-    ('guide_pages','content'), ('notices','content'), ('live_state','live'), ('quiz_answers','quiz'),
-    ('buzzes','buzz'), ('reactions','react')) v(tbl, topic) loop
+    ('settings','content'), ('members','content'), ('devices','content'),
+    ('live_state','live'), ('quiz_answers','quiz'), ('buzzes','buzz'), ('reactions','react')) v(tbl, topic) loop
     execute format('drop trigger if exists bump_%s on %I', r.tbl, r.tbl);
     execute format('create trigger bump_%s after insert or update or delete on %I for each row execute function _bump(%L)', r.tbl, r.tbl, r.topic);
   end loop;
@@ -220,7 +203,7 @@ begin
   select * into d from devices where key_hash = _key_hash(p_key);
   if d.status = 'approved' then return 'approved'; end if;
   if d.id is null and (select count(*) from devices where status = 'pending') >= 200 then raise exception '申請が多すぎます。運営に声をかけてください'; end if;
-  -- 名簿の名前と空白を除いて一致すれば候補として結びつけておく（承認は運営が行う）
+  -- 名簿の呼び名と空白を除いて一致すれば候補として結びつけておく（承認は運営が行う）
   select min(id::text)::uuid, count(*) into m, n from members
    where replace(replace(name, ' ', ''), '　', '') = replace(replace(trim(p_name), ' ', ''), '　', '');
   insert into devices (key_hash, typed_name, line_user_id, line_name, member_id)
@@ -235,13 +218,56 @@ language sql stable security definer set search_path = public as $$
   select coalesce((select status from devices where key_hash = _key_hash(p_key)), 'none');
 $$;
 
+-- ===== クイズの点数と進行 =====
+-- 正解なら 500 点 + 早さの点（出題から 20 秒で 0 点まで下がる、最大 500 点）
+create or replace function _quiz_ranking(p_limit int) returns jsonb
+language sql stable security definer set search_path = public as $$
+  select coalesce(jsonb_agg(jsonb_build_object('id', r.id, 'name', r.name, 'score', r.score, 'correct', r.correct) order by r.score desc, r.name), '[]')
+  from (select mb.id, mb.name, coalesce(sum(a.points), 0) as score,
+               count(*) filter (where a.points > 0) as correct
+          from members mb left join quiz_answers a on a.member_id = mb.id
+         where mb.id in (select member_id from devices where status = 'approved')
+         group by mb.id, mb.name
+         order by score desc, mb.name
+         limit p_limit) r;
+$$;
+
+-- 次の問題へ（answering → reveal → 次の問題の answering … → finished）
+create or replace function _quiz_step(p_force boolean) returns void
+language plpgsql security definer set search_path = public as $$
+declare s live_state; q int; n int; total int; answered int;
+begin
+  select * into s from live_state where id = 1 for update;
+  if s.scene <> 'quiz' then return; end if;
+  q := (s.payload->>'q')::int;
+  select count(*) into n from quiz_questions;
+  if s.payload->>'phase' = 'answering' then
+    select count(distinct member_id) into total from devices where status = 'approved';
+    select count(*) into answered from quiz_answers where question_order = q;
+    if p_force or (total > 0 and answered >= total) then
+      -- 正解発表。7 秒見せたら次へ進んでよい
+      update live_state set updated_at = now(), payload = s.payload || jsonb_build_object('phase', 'reveal',
+        'next_at', to_char((now() + interval '7 seconds') at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')) where id = 1;
+    end if;
+  elsif s.payload->>'phase' = 'reveal' then
+    if not p_force and now() < (s.payload->>'next_at')::timestamptz then return; end if;
+    if q >= n then
+      update live_state set updated_at = now(), payload = jsonb_build_object('q', q, 'phase', 'finished', 'total', n) where id = 1;
+    else
+      update live_state set updated_at = now(), payload = jsonb_build_object('q', q + 1, 'phase', 'answering', 'total', n,
+        'started_at', to_char(now() at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')) where id = 1;
+    end if;
+  end if;
+end $$;
+
 -- ===== 参加者・スクリーン：読む =====
--- いまの場面（発表の時刻前は、受賞者と発表の中身を外して返す）
 create or replace function live_view(p_key text) returns jsonb
-language plpgsql stable security definer set search_path = public as $$
-declare me uuid; s live_state; p jsonb; res jsonb; joined int; q quiz_questions; mine int; answered int;
+language plpgsql security definer set search_path = public as $$
+declare me uuid; s live_state; p jsonb; res jsonb; joined int; q quiz_questions; mine quiz_answers; answered int; ph text;
 begin
   me := _check_view(p_key);
+  -- 正解発表の時間が過ぎていたら次の問題へ進める（誰かが見に来たときに進む）
+  perform _quiz_step(false) where (select scene = 'quiz' and payload->>'phase' = 'reveal' from live_state where id = 1);
   select * into s from live_state where id = 1;
   p := s.payload;
   if s.scene in ('award', 'reveal') and now() < (p->>'show_at')::timestamptz then
@@ -250,78 +276,68 @@ begin
   select count(distinct member_id) into joined from devices where status = 'approved';
   res := jsonb_build_object('scene', s.scene, 'payload', p, 'joined', joined, 'server_now', now());
 
-  if s.scene = 'quiz' then
+  if s.scene = 'idle' then
+    res := res || jsonb_build_object('names', (
+      select coalesce(jsonb_agg(m.name order by d.created_at desc), '[]') from devices d join members m on m.id = d.member_id where d.status = 'approved'));
+  elsif s.scene = 'quiz' then
+    ph := p->>'phase';
     select * into q from quiz_questions where order_no = (p->>'q')::int;
-    select choice_index into mine from quiz_answers where member_id = me and question_order = q.order_no;
+    select * into mine from quiz_answers where member_id = me and question_order = q.order_no;
     select count(*) into answered from quiz_answers where question_order = q.order_no;
     res := res || jsonb_build_object('quiz', jsonb_build_object(
-      'question_text', q.question_text, 'choices', q.choices, 'my_choice', mine, 'answered', answered,
-      -- 正解は、自分が答えたあとか、全問終わってからだけ返す
-      'correct_index', case when mine is not null or p->>'phase' = 'finished' then q.correct_index end,
-      'ranking', case when p->>'phase' = 'finished' then (
-        select coalesce(jsonb_agg(jsonb_build_object('id', r.id, 'name', r.name, 'score', r.score) order by r.score desc, r.last), '[]')
-        from (select mb.id, mb.name,
-                count(*) filter (where a.choice_index = qq.correct_index) as score,
-                coalesce(max(a.answered_at), 'infinity') as last
-              from members mb
-              left join quiz_answers a on a.member_id = mb.id
-              left join quiz_questions qq on qq.order_no = a.question_order
-              where mb.id in (select member_id from devices where status = 'approved')
-              group by mb.id, mb.name) r) end));
+      'question_text', q.question_text, 'choices', q.choices, 'answered', answered,
+      'my_choice', mine.choice_index, 'my_points', case when ph <> 'answering' then mine.points end,
+      -- 正解・答えの分布・順位は、正解発表のあとにだけ返す
+      'correct_index', case when ph <> 'answering' then q.correct_index end,
+      'dist', case when ph <> 'answering' then (
+        select jsonb_agg(coalesce((select count(*) from quiz_answers a where a.question_order = q.order_no and a.choice_index = i), 0) order by i)
+        from generate_series(0, greatest(jsonb_array_length(q.choices) - 1, 0)) i) end,
+      'ranking', case when ph <> 'answering' then _quiz_ranking(1000) end));
   elsif s.scene = 'buzz' then
     res := res || jsonb_build_object('buzz', (
       select coalesce(jsonb_agg(jsonb_build_object('id', mb.id, 'name', mb.name) order by b.created_at, b.id), '[]')
       from buzzes b join members mb on mb.id = b.member_id where b.round = (p->>'round')::int));
   elsif s.scene = 'bingo' then
     res := res || jsonb_build_object('bingo_winners', (
-      select coalesce(jsonb_agg(distinct mb.name), '[]') from reactions r join members mb on mb.id = r.member_id
-      where r.kind = 'bingo' and r.created_at >= coalesce((p->>'started_at')::timestamptz, '-infinity')));
+      select coalesce(jsonb_agg(x.name order by x.at), '[]') from (
+        select mb.name, min(r.created_at) as at from reactions r join members mb on mb.id = r.member_id
+         where r.kind = 'bingo' and r.created_at >= coalesce((p->>'started_at')::timestamptz, '-infinity')
+         group by mb.name) x),
+      'reach', (select count(distinct member_id) from reactions
+         where kind = 'reach' and created_at >= coalesce((p->>'started_at')::timestamptz, '-infinity')));
   end if;
   return res;
 end $$;
 
--- ホームとしおりに要るものをまとめて返す
+-- 起動時に要るもの（自分の呼び名と、公開されていれば班・部屋）
 create or replace function view_all(p_key text) returns jsonb
-language plpgsql stable security definer set search_path = public as $$
-declare me uuid;
+language plpgsql security definer set search_path = public as $$
+declare me uuid; st settings;
 begin
   me := _check_view(p_key);
+  select * into st from settings where id = 1;
   return jsonb_build_object(
-    'me', (select to_jsonb(m) from members m where m.id = me),
-    'settings', (select to_jsonb(s) from settings s where id = 1),
-    'schedule', (select coalesce(jsonb_agg(to_jsonb(x) order by x.date, x.start_time), '[]') from schedule_items x),
-    'guide', (select coalesce(jsonb_agg(to_jsonb(x) order by x.sort), '[]') from guide_pages x),
-    'notices', (select coalesce(jsonb_agg(to_jsonb(x) order by x.created_at desc), '[]') from (select * from notices order by created_at desc limit 10) x),
+    'me', (select jsonb_build_object('id', m.id, 'name', m.name,
+             'team', case when st.show_profile then m.team end, 'room', case when st.show_profile then m.room end)
+           from members m where m.id = me),
+    'title', st.title,
     'live', live_view(p_key));
 end $$;
 
 -- ===== 参加者：書く =====
-create or replace function _quiz_try_advance(p_q int) returns void
-language plpgsql security definer set search_path = public as $$
-declare s live_state; total int; answered int; n int;
-begin
-  select * into s from live_state where id = 1 for update;
-  if s.scene <> 'quiz' or s.payload->>'phase' <> 'answering' or (s.payload->>'q')::int <> p_q then return; end if;
-  select count(distinct member_id) into total from devices where status = 'approved';
-  select count(*) into answered from quiz_answers where question_order = p_q;
-  if total = 0 or answered < total then return; end if;
-  select count(*) into n from quiz_questions;
-  update live_state set updated_at = now(), payload = case when p_q >= n
-      then jsonb_build_object('q', p_q, 'phase', 'finished', 'total', n)
-      else jsonb_build_object('q', p_q + 1, 'phase', 'answering', 'total', n) end
-   where id = 1;
-end $$;
-
 create or replace function quiz_answer(p_key text, p_q int, p_choice int) returns void
 language plpgsql security definer set search_path = public as $$
-declare me uuid; s live_state;
+declare me uuid; s live_state; q quiz_questions; elapsed numeric; pts int;
 begin
   me := _member(p_key);
   if me is null then raise exception '参加の承認がまだです'; end if;
   select * into s from live_state where id = 1;
   if s.scene <> 'quiz' or s.payload->>'phase' <> 'answering' or (s.payload->>'q')::int <> p_q then raise exception 'この問題の受付は終わりました'; end if;
-  insert into quiz_answers (member_id, question_order, choice_index) values (me, p_q, p_choice) on conflict do nothing;
-  perform _quiz_try_advance(p_q);
+  select * into q from quiz_questions where order_no = p_q;
+  elapsed := extract(epoch from now() - coalesce((s.payload->>'started_at')::timestamptz, now()));
+  pts := case when p_choice = q.correct_index then 500 + greatest(0, round(500 * (1 - elapsed / 20)))::int else 0 end;
+  insert into quiz_answers (member_id, question_order, choice_index, points) values (me, p_q, p_choice, pts) on conflict do nothing;
+  perform _quiz_step(false);
 end $$;
 
 create or replace function buzz_press(p_key text) returns void
@@ -341,10 +357,10 @@ declare me uuid;
 begin
   me := _member(p_key);
   if me is null then raise exception '参加の承認がまだです'; end if;
-  if p_kind not in ('clap', 'party', 'laugh', 'heart', 'bingo') then raise exception '種類が違います'; end if;
-  if p_kind = 'bingo' and (select scene from live_state where id = 1) <> 'bingo' then raise exception 'ビンゴの最中ではありません'; end if;
-  -- 連打で画面が埋まらないよう、1人1秒に1回まで
-  if exists (select 1 from reactions where member_id = me and created_at > now() - interval '1 second') then return; end if;
+  if p_kind not in ('clap', 'party', 'laugh', 'heart', 'bingo', 'reach') then raise exception '種類が違います'; end if;
+  if p_kind in ('bingo', 'reach') and (select scene from live_state where id = 1) <> 'bingo' then raise exception 'ビンゴの最中ではありません'; end if;
+  -- 連打で画面が埋まらないよう、1人1秒に1回まで（ビンゴ・リーチの宣言は除く）
+  if p_kind not in ('bingo', 'reach') and exists (select 1 from reactions where member_id = me and created_at > now() - interval '1 second') then return; end if;
   insert into reactions (member_id, kind) values (me, p_kind);
 end $$;
 
@@ -356,7 +372,7 @@ create or replace function _admin_guard(code text, tbl text) returns text
 language plpgsql stable security definer set search_path = public as $$
 begin
   if not is_admin(code) then raise exception 'パスコードが違います'; end if;
-  if tbl not in ('settings','members','schedule_items','guide_pages','notices','awards','reveals','quiz_questions') then
+  if tbl not in ('settings','members','awards','reveals','quiz_questions') then
     raise exception '編集できない表です: %', tbl;
   end if;
   return case tbl when 'quiz_questions' then 'order_no' else 'id' end;
@@ -414,7 +430,6 @@ begin
   update devices set member_id = p_member_id, status = 'approved' where id = p_device_id;
 end $$;
 
--- 名前が名簿と1人だけ一致した申請をまとめて承認する
 create or replace function admin_approve_matched(code text) returns int
 language plpgsql security definer set search_path = public as $$
 declare n int;
@@ -432,12 +447,57 @@ begin
   delete from devices where id = p_device_id;
 end $$;
 
+-- 場面を切り替える（クイズは admin_quiz、ビンゴは admin_bingo、表彰・重大発表は admin_present で出す）
 create or replace function admin_set_live(code text, p_scene text, p_payload jsonb) returns void
 language plpgsql security definer set search_path = public as $$
 begin
   if not is_admin(code) then raise exception 'パスコードが違います'; end if;
-  if p_scene not in ('idle','work','quiz','buzz','bingo') then raise exception '切り替えられない場面です: %', p_scene; end if;
+  if p_scene not in ('idle','buzz') then raise exception '切り替えられない場面です: %', p_scene; end if;
   update live_state set scene = p_scene, payload = coalesce(p_payload, '{}'), updated_at = now() where id = 1;
+end $$;
+
+-- ビンゴの操作（start: 新しいカードで始める / draw: まだ出ていない番号を1つ引く）
+-- 番号はサーバーで引いて足す。運営が素早く続けて押しても、引いた番号が消えない
+create or replace function admin_bingo(code text, p_action text) returns int
+language plpgsql security definer set search_path = public as $$
+declare s live_state; nums jsonb; pick int;
+begin
+  if not is_admin(code) then raise exception 'パスコードが違います'; end if;
+  if p_action = 'start' then
+    update live_state set scene = 'bingo', updated_at = now(), payload = jsonb_build_object('seed', (extract(epoch from now()) * 1000)::bigint,
+      'numbers', '[]'::jsonb, 'started_at', to_char(now() at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')) where id = 1;
+    return null;
+  elsif p_action = 'draw' then
+    select * into s from live_state where id = 1 for update;
+    if s.scene <> 'bingo' then raise exception 'ビンゴの最中ではありません'; end if;
+    nums := coalesce(s.payload->'numbers', '[]'::jsonb);
+    select n into pick from generate_series(1, 75) n where not nums @> to_jsonb(n) order by random() limit 1;
+    if pick is null then raise exception 'すべての番号が出ました'; end if;
+    update live_state set updated_at = now(), payload = s.payload || jsonb_build_object('numbers', nums || to_jsonb(pick)) where id = 1;
+    return pick;
+  end if;
+  raise exception '操作が違います: %', p_action;
+end $$;
+
+-- クイズの操作（start: 回答を消して1問目から / next: 次の段階へ進める / finish: 結果発表へ）
+create or replace function admin_quiz(code text, p_action text) returns void
+language plpgsql security definer set search_path = public as $$
+declare n int;
+begin
+  if not is_admin(code) then raise exception 'パスコードが違います'; end if;
+  select count(*) into n from quiz_questions;
+  if p_action = 'start' then
+    if n = 0 then raise exception 'クイズの問題がありません'; end if;
+    delete from quiz_answers where true;
+    update live_state set scene = 'quiz', updated_at = now(), payload = jsonb_build_object('q', (select min(order_no) from quiz_questions),
+      'phase', 'answering', 'total', n, 'started_at', to_char(now() at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')) where id = 1;
+  elsif p_action = 'next' then
+    perform _quiz_step(true);
+  elsif p_action = 'finish' then
+    update live_state set updated_at = now(), payload = payload || jsonb_build_object('phase', 'finished') where id = 1 and scene = 'quiz';
+  else
+    raise exception '操作が違います: %', p_action;
+  end if;
 end $$;
 
 create or replace function admin_present(code text, p_kind text, p_id uuid, p_delay_sec int default 5) returns void
@@ -481,7 +541,7 @@ begin
   if confirm_text <> 'すべて消す' then raise exception '確認の文字が違います'; end if;
   delete from quiz_answers where true; delete from buzzes where true; delete from reactions where true;
   delete from devices where true; delete from members where true;
-  delete from awards where true; delete from reveals where true; delete from notices where true;
+  delete from awards where true; delete from reveals where true;
   update live_state set scene = 'idle', payload = '{}', updated_at = now() where id = 1;
 end $$;
 
@@ -493,28 +553,14 @@ begin
   update admin_config set passcode_hash = extensions.crypt(new_code, extensions.gen_salt('bf', 10)) where id = 1;
 end $$;
 
+-- 古い版の関数を片付ける
+drop function if exists _quiz_try_advance(int);
+
 -- 内部用の関数は画面から呼べないようにする
 revoke execute on function is_admin(text), _key_hash(text), _member(text), _check_view(text), _admin_guard(text, text),
-  _quiz_try_advance(int), set_initial_passcode(text), _bump() from public, anon, authenticated;
+  _quiz_ranking(int), _quiz_step(boolean), set_initial_passcode(text), _bump() from public, anon, authenticated;
 
 -- ===== 仮の中身（運営パネルからいつでも書き換えられる。社員の情報は入れない） =====
-insert into guide_pages (title, body, sort)
-select * from (values
-  ('持ち物', E'・ノートPC と充電器\n・筆記用具\n・着替え（1泊分）\n・常備薬\n（会場が決まったら更新します）', 1),
-  ('合宿のルール', E'・時間を守る\n・スマホはクイズやゲームで使うので、充電しておく\n（運営が書き換えます）', 2)
-) v(title, body, sort)
-where not exists (select 1 from guide_pages);
-
-insert into schedule_items (date, start_time, end_time, title)
-select * from (values
-  ('2027-01-08'::date, '09:00'::time, '09:30'::time, '集合・オープニング（仮）'),
-  ('2027-01-08'::date, '09:30'::time, '12:00'::time, 'ワーク（仮）'),
-  ('2027-01-08'::date, '18:00'::time, '19:00'::time, '懇親会（仮）'),
-  ('2027-01-09'::date, '09:00'::time, '12:00'::time, 'ワーク（仮）'),
-  ('2027-01-09'::date, '17:00'::time, '19:00'::time, '表彰・クロージング（仮）')
-) v(date, start_time, end_time, title)
-where not exists (select 1 from schedule_items);
-
 insert into quiz_questions (order_no, question_text, choices, correct_index) values
 (1, 'サンプル問題1（差し替え予定）', '["選択肢A","選択肢B","選択肢C","選択肢D"]', 0),
 (2, 'サンプル問題2（差し替え予定）', '["選択肢A","選択肢B","選択肢C","選択肢D"]', 1),

@@ -2,39 +2,37 @@
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="robots" content="noindex, nofollow">
-<title>合宿アプリ</title>
+<meta name="theme-color" content="#17182B">
+<title>合宿あそび</title>
 <script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
 <script src="common.js"></script>
 <link rel="stylesheet" href="style.css">
 </head>
 <body class="phone">
-
-<header id="hd">
-  <div class="hd-title" id="hd-title">合宿アプリ</div>
-  <div class="hd-name" id="hd-name"></div>
+<div class="lobby-bg"></div>
+<header class="topbar">
+  <div class="brand" id="brand">合宿<b>あそび</b></div>
+  <button class="me-chip" id="me-chip" hidden></button>
 </header>
-<main id="view"><p class="msg">読み込み中…</p></main>
-<nav id="tabs" hidden>
-  <button data-tab="home" class="on">ホーム</button>
-  <button data-tab="guide">しおり</button>
-  <button data-tab="live">ライブ<span class="dot" id="live-dot" hidden></span></button>
-</nav>
+<main id="view"><div class="screen-fill"><div class="dots"><span></span><span></span><span></span></div></div></main>
 
 <script>
+// 参加者の画面。タブは持たず、運営が切り替えた「いまのゲーム」だけを1画面で見せる
 const DEV = new URLSearchParams(location.search).has('dev'); // PC での動作確認用（LINE を通さずに開く）
 const KEY = deviceKey();
-let me = null;            // 名簿の自分の行
-let tab = 'home';
-let data = { settings: {}, schedule: [], guide: [], notices: [] };
+let me = null;
 let live = { scene: 'idle', payload: {} };
-let tick = null;          // タイマー・カウントダウン用
+let tick = null;
 let line = { id: '', name: '' };
+let lastFx = '';           // 紙吹雪などの演出を同じ場面で何度も出さないための印
 
 const $view = document.getElementById('view');
-const fail = e => { $view.innerHTML = `<p class="msg">うまく読み込めませんでした。開き直してください。<br><small>${esc(e.message)}</small></p>`; };
+const fill = html => { $view.innerHTML = `<div class="screen-fill">${html}</div>`; };
+const fail = e => fill(`<div class="headline">うまく読み込めませんでした</div><div class="muted">LINE から開き直してください<br><small>${esc(e.message)}</small></div>`);
+const buzzVibe = ms => { try { navigator.vibrate && navigator.vibrate(ms); } catch (e) {} };
 
 async function main() {
   try {
@@ -51,246 +49,235 @@ async function main() {
   } catch (e) { fail(e); }
 }
 
-// ===== はじめて開いたとき：名前を書いて参加を申請する =====
+// ===== はじめて開いたとき：呼び名を入れて参加を申請する =====
 function renderJoin() {
-  $view.innerHTML = `
-    <h2>はじめに、あなたの名前を入れてください</h2>
-    <p class="sub">運営から案内された呼び名（ひらがなの下の名前かニックネーム）を入れてください。運営が確認して承認すると、合宿の案内が見られるようになります。</p>
-    <input id="nm" class="input" placeholder="例：れいや">
-    <button class="banner" id="join" style="margin-top:12px">参加を申請する</button>`;
+  fill(`<div class="lobby-emoji">🎮</div>
+    <div class="join-card">
+      <div class="kicker" style="color:var(--accent)">ようこそ</div>
+      <h2>あなたの呼び名を入れてください</h2>
+      <p class="sub">運営から案内された呼び名（ひらがなの下の名前かニックネーム）を入れます。運営が確認すると、ゲームに参加できます。</p>
+      <input id="nm" class="input" placeholder="例：れいや" autocomplete="off">
+      <button class="big-btn" id="join">参加する</button>
+    </div>`);
   document.getElementById('join').onclick = async () => {
     const name = document.getElementById('nm').value.trim();
     if (!name) return;
-    try {
-      await call('join_request', { p_key: KEY, p_name: name, p_line_user_id: line.id, p_line_name: line.name });
-      renderPending();
-    } catch (e) { alert(e.message); }
+    try { await call('join_request', { p_key: KEY, p_name: name, p_line_user_id: line.id, p_line_name: line.name }); renderPending(); }
+    catch (e) { alert(e.message); }
   };
 }
 
 let pendingTimer = null;
 function renderPending() {
-  $view.innerHTML = `<p class="msg">参加を申請しました。<br>運営の承認を待っています。<br>承認されると、この画面が自動で切り替わります。</p>
-    <p class="center"><button class="btn small" id="redo">名前を入れ直す</button></p>`;
+  fill(`<div class="dots"><span></span><span></span><span></span></div>
+    <div class="headline">運営の確認を<br>待っています</div>
+    <div class="muted">確認が済むと、この画面が自動で切り替わります</div>
+    <button class="ghost-btn" id="redo">呼び名を入れ直す</button>`);
   document.getElementById('redo').onclick = () => { clearInterval(pendingTimer); renderJoin(); };
   clearInterval(pendingTimer);
   pendingTimer = setInterval(async () => {
-    try {
-      if (await call('my_status', { p_key: KEY }) === 'approved') { clearInterval(pendingTimer); start(); }
-    } catch (e) {}
-  }, 5000);
+    try { if (await call('my_status', { p_key: KEY }) === 'approved') { clearInterval(pendingTimer); start(); } } catch (e) {}
+  }, 4000);
 }
 
-// ===== 通常画面 =====
+// ===== 参加中 =====
 async function start() {
   try { await loadAll(); } catch (e) { return fail(e); }
-  document.getElementById('hd-name').textContent = me ? `${me.name} さん` : '';
-  document.getElementById('tabs').hidden = false;
-  document.querySelectorAll('#tabs button').forEach(b => b.addEventListener('click', () => setTab(b.dataset.tab)));
-  if (live.scene !== 'idle') tab = 'live';
-  setTab(tab);
-  const reloadAll = debounce(async () => { try { await loadAll(); if (tab !== 'live') render(); } catch (e) {} });
-  const reloadLive = debounce(refreshLive, 200);
+  const chip = document.getElementById('me-chip');
+  chip.hidden = false;
+  chip.innerHTML = `<span class="av">${esc((me?.name || '?').slice(0, 1))}</span>${esc(me?.name || '')}`;
+  chip.onclick = openProfile;
+  render();
+  const reloadAll = debounce(() => loadAll().then(render).catch(() => {}), 300);
+  const reloadLive = debounce(refreshLive, 150);
   onPulse((topic, info) => {
-    if (topic === 'content') reloadAll();
-    else if (topic === 'react') { if (info.kind === 'bingo') reloadLive(); }
-    else if (topic === 'poll') { reloadAll(); reloadLive(); }
+    if (topic === 'content' || topic === 'poll') reloadAll();
+    else if (topic === 'react') { if (info.kind === 'bingo' || info.kind === 'reach') reloadLive(); }
     else reloadLive();
   });
-  setInterval(() => { if (tab === 'home') renderHome(); }, 60000); // 「いま」の印を1分ごとに更新
 }
 
 async function loadAll() {
   let v;
   try { v = await call('view_all', { p_key: KEY }); }
   catch (e) { if (e.message.includes('承認')) location.reload(); throw e; } // 承認を取り消されたとき
-  me = v.me; data = v; setLive(v.live, false);
-  document.getElementById('hd-title').textContent = v.settings?.title || '合宿アプリ';
-  document.title = v.settings?.title || '合宿アプリ';
+  me = v.me; setLive(v.live);
+  if (v.title) document.getElementById('brand').textContent = v.title;
 }
 
 async function refreshLive() {
-  try { setLive(await call('live_view', { p_key: KEY }), true); } catch (e) {}
+  try { const next = await call('live_view', { p_key: KEY }); if (setLive(next)) render(); } catch (e) {}
 }
-
-function setLive(next, rerender) {
+// 変わったときだけ true を返す
+function setLive(next) {
   syncClock(next.server_now);
-  const changedScene = next.scene !== live.scene;
-  const before = JSON.stringify({ ...live, server_now: 0 });
+  const same = JSON.stringify({ ...live, server_now: 0 }) === JSON.stringify({ ...next, server_now: 0 });
   live = next;
-  if (!rerender) return;
-  if (changedScene && next.scene !== 'idle') return setTab('live');
-  document.getElementById('live-dot').hidden = live.scene === 'idle' || tab === 'live';
-  if (tab === 'live' && before !== JSON.stringify({ ...live, server_now: 0 })) render();
-  if (tab === 'home' && changedScene) renderHome();
+  return !same;
 }
 
-function setTab(t) {
-  tab = t;
-  document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === t));
-  document.getElementById('live-dot').hidden = live.scene === 'idle' || t === 'live';
-  render();
+// 自分の呼び名をタップすると、班と部屋（運営が公開していれば）が見える
+function openProfile() {
+  const back = document.createElement('div');
+  back.className = 'sheet-back';
+  const hasTeam = me && (me.team || me.room);
+  back.innerHTML = `<div class="sheet"><h3>${esc(me?.name)} さん</h3>
+    ${me && me.team !== null && me.team !== undefined
+      ? `<div class="row"><span>班</span><b>${esc(me.team) || '未定'}</b></div><div class="row"><span>部屋</span><b>${esc(me.room) || '未定'}</b></div>`
+      : '<p class="sub">班と部屋は、運営が発表するまでお楽しみです。</p>'}
+    <button class="btn" style="width:100%;margin-top:16px" id="close">とじる</button></div>`;
+  back.onclick = e => { if (e.target === back || e.target.id === 'close') back.remove(); };
+  document.body.appendChild(back);
 }
 
+// ===== 場面ごとの画面 =====
 function render() {
   clearInterval(tick); tick = null;
-  if (tab === 'home') renderHome();
-  else if (tab === 'guide') renderGuide();
-  else renderLive();
-}
-
-function renderHome() {
-  const s = data.settings || {};
-  const groups = groupSchedule(data.schedule || []);
-  $view.innerHTML = `
-    ${live.scene !== 'idle' ? `<button class="banner" id="go-live">いま「${esc(sceneName(live.scene))}」をやっています。ライブを開く</button>` : ''}
-    <section class="card hero">
-      <div class="hero-title">${esc(s.title)}</div>
-      <div class="hero-sub">${esc(s.period_text)}</div>
-      <div class="hero-sub">会場：${esc(s.venue)}</div>
-      ${s.message ? `<p class="hero-msg">${escBr(s.message)}</p>` : ''}
-    </section>
-    ${me ? `<section class="card mine">
-      <div><span class="label">班</span><b>${esc(me.team) || '未定'}</b></div>
-      <div><span class="label">部屋</span><b>${esc(me.room) || '未定'}</b></div>
-    </section>` : ''}
-    ${(data.notices || []).length ? `<section><h3>お知らせ</h3>${data.notices.map(n => `
-      <div class="notice"><div>${escBr(n.body)}</div><time>${new Date(n.created_at).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</time></div>`).join('')}</section>` : ''}
-    <section><h3>日程</h3>
-      ${groups.map(g => `<div class="day">${fmtDate(g.date)}</div>
-        ${g.items.map(it => `<div class="sch ${it.isNow ? 'now' : ''}">
-          <div class="sch-time">${hhmm(it.start_time)}${it.end_time ? '〜' + hhmm(it.end_time) : ''}</div>
-          <div class="sch-body"><b>${esc(it.title)}</b>${it.isNow ? '<span class="now-tag">いま</span>' : ''}
-            ${it.place ? `<div class="sub">${esc(it.place)}</div>` : ''}${it.note ? `<div class="sub">${escBr(it.note)}</div>` : ''}</div>
-        </div>`).join('')}`).join('') || '<p class="sub">日程は準備中です。</p>'}
-    </section>`;
-  document.getElementById('go-live')?.addEventListener('click', () => setTab('live'));
-}
-
-function renderGuide() {
-  $view.innerHTML = `<h2>しおり</h2>` + ((data.guide || []).map(p => `
-    <details class="card guide"><summary>${esc(p.title)}</summary><div class="guide-body">${escBr(p.body)}</div></details>`).join('')
-    || '<p class="sub">しおりは準備中です。</p>');
-}
-
-const sceneName = s => ({ idle: '待機', work: 'ワーク', award: '表彰', reveal: '重大発表', quiz: 'クイズ', buzz: '早押し', bingo: 'ビンゴ' }[s] || s);
-
-// ===== ライブ（運営が切り替える場面） =====
-function renderLive() {
   const p = live.payload || {};
   switch (live.scene) {
-    case 'idle':
-      $view.innerHTML = `<p class="msg">いまは進行中のプログラムはありません。<br>始まると、この画面が自動で切り替わります。</p>`;
-      break;
-    case 'work': {
-      const draw = () => {
-        const left = p.ends_at ? secondsUntil(p.ends_at) : null;
-        $view.innerHTML = `<div class="live-kind">ワーク</div><h2>${esc(p.title)}</h2>
-          ${left !== null ? `<div class="timer ${left === 0 ? 'over' : ''}">${left === 0 ? '時間です' : `残り ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`}</div>` : ''}
-          ${p.body ? `<div class="card">${escBr(p.body)}</div>` : ''}`;
-      };
-      draw(); if (p.ends_at) tick = setInterval(draw, 1000);
-      break;
-    }
-    case 'award':
-    case 'reveal': {
-      const isAward = live.scene === 'award';
-      const kind = isAward ? '表彰' : '重大発表';
-      const hasContent = isAward ? p.winner !== undefined : p.title !== undefined;
-      const draw = () => {
-        const left = secondsUntil(p.show_at);
-        if (left > 0 || !hasContent) {
-          $view.innerHTML = `<div class="stage dark"><div class="live-kind">${kind}</div>
-            ${isAward ? `<div class="stage-cat">${esc(p.category)}</div><div class="stage-wait">受賞者は……</div>` : '<div class="stage-wait">まもなく発表します</div>'}
-            <div class="count">${left || '…'}</div></div>`;
-          // 時刻になったら中身を取りにいく（中身は時刻になるまでサーバーから届かない）
-          if (left === 0) { clearInterval(tick); tick = null; setTimeout(refreshLive, 300); }
-        } else {
-          clearInterval(tick); tick = null;
-          $view.innerHTML = `<div class="stage open"><div class="live-kind">${kind}</div>
-            ${isAward ? `<div class="stage-cat">${esc(p.category)}</div><div class="stage-winner">${esc(p.winner)}</div>` : `<div class="stage-winner">${esc(p.title)}</div>`}
-            <div class="stage-body">${escBr(isAward ? p.comment : p.body)}</div></div>${reactionBar()}`;
-          bindReactions();
-        }
-      };
-      draw(); if (secondsUntil(p.show_at) > 0) tick = setInterval(draw, 250);
-      break;
-    }
-    case 'quiz': renderQuiz(p, live.quiz || {}); break;
-    case 'buzz': renderBuzz(p, live.buzz || []); break;
-    case 'bingo': renderBingo(p, live.bingo_winners || []); break;
+    case 'quiz': return renderQuiz(p, live.quiz || {});
+    case 'buzz': return renderBuzz(p, live.buzz || []);
+    case 'bingo': return renderBingo(p);
+    case 'award': case 'reveal': return renderStage(p);
+    default: return renderLobby();
   }
 }
 
-function reactionBar() {
-  return `<div class="reacts">${REACTIONS.map(r => `<button class="react" data-k="${r.kind}">${r.emoji}</button>`).join('')}</div>`;
-}
-function bindReactions() {
-  $view.querySelectorAll('.react').forEach(b => b.addEventListener('click', () => {
-    call('react', { p_key: KEY, p_kind: b.dataset.k }).catch(() => {});
-    b.classList.remove('pop'); void b.offsetWidth; b.classList.add('pop');
-  }));
+function renderLobby() {
+  const names = live.names || [];
+  fill(`<div class="lobby-emoji">🎉</div>
+    <div class="kicker">STAND BY</div>
+    <div class="headline">まもなく<br>ゲームが始まります</div>
+    <div><div class="count-big">${live.joined ?? 0}</div><div class="muted">人が参加中</div></div>
+    <div class="names">${names.slice(0, 40).map(n => `<span class="${n === me?.name ? 'me' : ''}">${esc(n)}</span>`).join('')}</div>
+    <div class="muted">始まると、この画面が自動で切り替わります</div>`);
 }
 
-// クイズ（正解は自分が答えたあとにだけサーバーから届く）
+// クイズ：スマホは色と形のボタンだけ。問題はスクリーンにも大きく出る
 function renderQuiz(p, q) {
+  const head = `<div class="q-head"><span class="pill">Q${p.q} / ${p.total}</span><span class="pill">クイズ</span></div>`;
   if (p.phase === 'finished') {
     const rank = q.ranking || [];
     const mine = rank.findIndex(r => r.id === me?.id);
-    $view.innerHTML = `<div class="live-kind">クイズ</div><h2>結果発表</h2>
-      ${mine >= 0 ? `<div class="myscore">あなたは ${rank[mine].score} 問正解（${mine + 1}位）</div>` : ''}
-      <ol class="rank">${rank.slice(0, 10).map((r, i) => `<li class="${r.id === me?.id ? 'me' : ''}"><span>${i + 1}位 ${esc(r.name)}</span><span>${r.score}問</span></li>`).join('')}</ol>`;
+    $view.innerHTML = `<div class="screen-fill"><div class="kicker">RESULT</div><div class="headline">結果発表</div>
+      ${podiumHtml(rank)}
+      ${mine >= 0 ? `<div class="rank-card">あなたは ${mine + 1}位　${rank[mine].score.toLocaleString()}点（${rank[mine].correct}問正解）</div>` : ''}</div>`;
+    if (mine === 0) fx('quiz-win', () => confetti());
     return;
   }
-  const head = `<div class="live-kind">クイズ　Q${p.q} / ${p.total}</div><h2>${esc(q.question_text)}</h2>`;
+  if (p.phase === 'reveal') {
+    const rank = q.ranking || [];
+    const mine = rank.findIndex(r => r.id === me?.id);
+    const answered = q.my_choice !== null && q.my_choice !== undefined;
+    const ok = answered && q.my_choice === q.correct_index;
+    const sh = SHAPES[q.correct_index] || SHAPES[0];
+    $view.innerHTML = `<div class="result ${!answered ? 'none' : ok ? 'ok' : 'ng'}">
+      <div class="mark">${!answered ? '⏱' : ok ? '⭕' : '❌'}</div>
+      <div class="word">${!answered ? '時間切れ' : ok ? '正解！' : 'ざんねん'}</div>
+      ${ok ? `<div class="pts">+<span id="pts">0</span></div>` : ''}
+      <div class="muted" style="color:#fff">正解は <b>${sh.name}</b>「${esc((q.choices || [])[q.correct_index])}」</div>
+      ${mine >= 0 ? `<div class="rank-card">いま ${mine + 1}位 / ${rank.length}人　${rank[mine].score.toLocaleString()}点</div>` : ''}
+      <div class="muted" style="color:#fff;margin-top:8px">まもなく次の問題へ</div></div>`;
+    if (ok) countUp(document.getElementById('pts'), q.my_points || 0);
+    fx(`reveal-${p.q}`, () => buzzVibe(ok ? [60, 40, 60] : 200));
+    // 正解発表の時間が過ぎたら読み直す（サーバーが次の問題へ進める）
+    if (p.next_at) tick = setTimeout(refreshLive, Math.max(500, secondsUntil(p.next_at) * 1000 + 300));
+    return;
+  }
+  // 出題中
   if (q.my_choice === null || q.my_choice === undefined) {
-    $view.innerHTML = head + `<div class="choices">${(q.choices || []).map((c, i) => `<button class="choice" data-i="${i}">${'ABCDEFG'[i]}．${esc(c)}</button>`).join('')}</div>`;
-    $view.querySelectorAll('.choice').forEach(b => b.addEventListener('click', async () => {
-      $view.querySelectorAll('.choice').forEach(x => x.disabled = true);
-      try { await call('quiz_answer', { p_key: KEY, p_q: p.q, p_choice: Number(b.dataset.i) }); }
-      catch (e) { alert(e.message); }
+    $view.innerHTML = head + `<p class="q-text">${esc(q.question_text)}</p>
+      <div class="answers">${(q.choices || []).map((c, i) => { const s = SHAPES[i]; return `
+        <button class="ans" data-i="${i}" style="background:${s.color}" aria-label="${s.name} ${esc(c)}">${s.svg}<span>${esc(c)}</span></button>`; }).join('')}</div>`;
+    $view.querySelectorAll('.ans').forEach(b => b.addEventListener('click', async () => {
+      $view.querySelectorAll('.ans').forEach(x => { x.disabled = true; if (x !== b) x.classList.add('dim'); });
+      buzzVibe(30);
+      try { await call('quiz_answer', { p_key: KEY, p_q: p.q, p_choice: Number(b.dataset.i) }); } catch (e) { alert(e.message); }
       refreshLive();
     }));
     return;
   }
-  const ok = q.my_choice === q.correct_index;
-  $view.innerHTML = head + `<div class="badge ${ok ? 'ok' : 'ng'}">${ok ? '正解！' : '不正解'}</div>
-    <p class="sub">正解は ${'ABCDEFG'[q.correct_index]}．${esc(q.choices[q.correct_index])}</p>
-    <div class="card center">ほかの人の回答を待っています<div class="big">${q.answered} / ${live.joined} 人</div>全員が答えると次の問題へ進みます</div>`;
+  const s = SHAPES[q.my_choice];
+  const pct = live.joined ? Math.round(q.answered / live.joined * 100) : 0;
+  $view.innerHTML = head + `<div class="answered-box" style="background:${s.color}">
+    ${s.svg}<div class="headline">回答しました</div>
+    <div class="ring" style="--p:${pct}"><div>${q.answered}/${live.joined}</div></div>
+    <div class="muted" style="color:#fff">全員がそろうと正解発表です</div></div>`;
 }
 
 // 早押し
 function renderBuzz(p, order) {
   const myRank = order.findIndex(b => b.id === me?.id);
-  $view.innerHTML = `<div class="live-kind">早押し　第${p.round}問</div>
-    ${p.question ? `<h2>${esc(p.question)}</h2>` : ''}
-    ${p.open && myRank < 0 ? `<button class="buzz" id="buzz">押す！</button>` : `<div class="card center">${myRank >= 0 ? `あなたは <b class="big">${myRank + 1}番目</b>` : '受付を締め切りました'}</div>`}
-    <ol class="rank">${order.slice(0, 5).map((b, i) => `<li class="${b.id === me?.id ? 'me' : ''}"><span>${i + 1}番 ${esc(b.name)}</span></li>`).join('')}</ol>`;
-  document.getElementById('buzz')?.addEventListener('click', async e => {
-    e.target.disabled = true;
+  const list = `<ol class="order">${order.slice(0, 5).map((b, i) => `<li class="${b.id === me?.id ? 'me' : ''}"><b>${i + 1}</b>${esc(b.name)}</li>`).join('')}</ol>`;
+  if (myRank >= 0) {
+    fill(`<div class="kicker">HAYAOSHI</div><div class="buzz-done">${myRank + 1}番</div><div class="headline">${myRank === 0 ? '一番乗り！' : '押しました！'}</div>${list}`);
+    if (myRank === 0) fx(`buzz-${p.round}`, () => confetti(50));
+    return;
+  }
+  if (!p.open) { fill(`<div class="kicker">HAYAOSHI</div><div class="headline">受付終了</div>${list}`); return; }
+  $view.innerHTML = `<div class="q-head"><span class="pill">早押し　第${p.round}問</span></div>
+    ${p.question ? `<p class="q-text">${esc(p.question)}</p>` : ''}
+    <div class="buzz-wrap"><button class="buzz" id="buzz">押す！</button></div>`;
+  document.getElementById('buzz').addEventListener('click', async e => {
+    e.target.disabled = true; buzzVibe(80);
     try { await call('buzz_press', { p_key: KEY }); } catch (err) { alert(err.message); }
     refreshLive();
   });
 }
 
-// ビンゴ（カードは自分の名簿 id と回ごとの番号から決まる）
-function renderBingo(p, winners) {
+// ビンゴ（カードは自分の名簿 id と回ごとの番号から決まり、出た番号は自動で開く）
+let reachSent = '', bingoSent = '';
+function renderBingo(p) {
   const drawn = p.numbers || [];
   const grid = bingoCard(me?.id || 'x', p.seed);
   const lines = bingoLines(grid, drawn);
   const last = drawn[drawn.length - 1];
-  const done = winners.includes(me?.name);
-  $view.innerHTML = `<div class="live-kind">ビンゴ</div>
-    <div class="bingo-last">${last ? `いまの番号 <b>${last}</b>` : '番号が出るのを待っています'}</div>
+  // リーチ：あと1つで1列そろうマスがあるか
+  const isReach = !lines && grid.flat().some(n => n !== 0 && !drawn.includes(n) && bingoLines(grid, [...drawn, n]) > 0);
+  const done = (live.bingo_winners || []).includes(me?.name);
+  $view.innerHTML = `<div class="q-head"><span class="pill">ビンゴ　${drawn.length}個目</span><span class="pill">リーチ ${live.reach ?? 0}人</span></div>
+    ${last ? `<div class="ball" key="${last}">${last}</div>` : '<div class="muted center">番号が出るのを待っています</div>'}
+    <div class="center">${isReach ? '<span class="reach">リーチ！</span>' : ''}</div>
     <div class="bingo">${'BINGO'.split('').map(ch => `<div class="bh">${ch}</div>`).join('')}
-      ${grid.flat().map(n => `<div class="bc ${n === 0 || drawn.includes(n) ? 'hit' : ''} ${n === last ? 'last' : ''}">${n === 0 ? 'FREE' : n}</div>`).join('')}</div>
-    <div class="center sub">${lines ? `${lines}列そろっています` : 'たて・よこ・ななめのどれか1列そろえばビンゴ'}</div>
-    ${lines ? `<button class="buzz" id="bingo" ${done ? 'disabled' : ''}>${done ? '運営に知らせました' : 'ビンゴ！を知らせる'}</button>` : ''}`;
+      ${grid.flat().map(n => `<div class="bc ${n === 0 ? 'free' : drawn.includes(n) ? 'hit' : ''} ${n === last ? 'last' : ''}">${n === 0 ? 'FREE' : n}</div>`).join('')}</div>
+    ${lines ? `<button class="bingo-btn" id="bingo" ${done ? 'disabled' : ''}>${done ? '運営に届きました' : 'BINGO！'}</button>` : ''}`;
+  // リーチになったら運営とスクリーンに1回だけ知らせる
+  if (isReach && reachSent !== String(p.seed)) { reachSent = String(p.seed); call('react', { p_key: KEY, p_kind: 'reach' }).catch(() => {}); buzzVibe(100); }
   document.getElementById('bingo')?.addEventListener('click', async e => {
-    e.target.disabled = true; e.target.textContent = '運営に知らせました';
-    await call('react', { p_key: KEY, p_kind: 'bingo' }).catch(err => alert(err.message));
+    e.target.disabled = true; e.target.textContent = '運営に届きました';
+    if (bingoSent !== String(p.seed)) { bingoSent = String(p.seed); confetti(); await call('react', { p_key: KEY, p_kind: 'bingo' }).catch(err => alert(err.message)); }
   });
 }
+
+// 表彰・重大発表（受賞者と中身は、発表の時刻までサーバーから届かない）
+function renderStage(p) {
+  const isAward = live.scene === 'award';
+  const hasContent = isAward ? p.winner !== undefined : p.title !== undefined;
+  const draw = () => {
+    const left = secondsUntil(p.show_at);
+    if (left > 0 || !hasContent) {
+      $view.innerHTML = `<div class="stage"><div class="kicker">${isAward ? 'AWARD' : 'ANNOUNCEMENT'}</div>
+        ${isAward ? `<div class="stage-cat">${esc(p.category)}</div><div class="drum">受賞者は…… ドゥルルルル</div>` : '<div class="drum">重大発表があります</div>'}
+        <div class="count">${left || '…'}</div></div>`;
+      if (left === 0) { clearInterval(tick); tick = null; setTimeout(refreshLive, 300); }
+    } else {
+      clearInterval(tick); tick = null;
+      $view.innerHTML = `<div class="stage"><div class="kicker">${isAward ? 'AWARD' : 'ANNOUNCEMENT'}</div>
+        ${isAward ? `<div class="stage-cat">${esc(p.category)}</div><div class="winner">${esc(p.winner)}</div>` : `<div class="winner">${esc(p.title)}</div>`}
+        <div class="stage-body">${escBr(isAward ? p.comment : p.body)}</div>
+        <div class="reacts">${REACTIONS.map(r => `<button class="react" data-k="${r.kind}">${r.emoji}</button>`).join('')}</div></div>`;
+      fx(`stage-${p.id}-${p.show_at}`, () => { confetti(); buzzVibe([80, 50, 80]); });
+      $view.querySelectorAll('.react').forEach(b => b.addEventListener('click', () => {
+        call('react', { p_key: KEY, p_kind: b.dataset.k }).catch(() => {});
+        b.classList.remove('pop'); void b.offsetWidth; b.classList.add('pop');
+      }));
+    }
+  };
+  draw(); if (secondsUntil(p.show_at) > 0) tick = setInterval(draw, 250);
+}
+
+// 演出を同じ場面で1回だけ出す
+function fx(id, f) { if (lastFx !== id) { lastFx = id; f(); } }
 
 main();
 </script>
