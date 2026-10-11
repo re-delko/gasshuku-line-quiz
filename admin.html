@@ -59,24 +59,43 @@ document.getElementById('pass').onkeydown = e => { if (e.key === 'Enter') login(
 document.getElementById('logout').onclick = () => { sessionStorage.removeItem('adm_code'); location.reload(); };
 if (code) login(code);
 
+// 台本の種類
+const KINDS = [['idle', '待機'], ['quiz', 'クイズ'], ['buzz', '早押し'], ['bingo', 'ビンゴ'], ['ranking', '総合ランキング発表'], ['award', '表彰（次の1つ）'], ['reveal', '重大発表（次の1つ）']];
+const KIND_NAME = Object.fromEntries(KINDS);
+
 // ===== 編集する表の定義（タブ = 1つの表） =====
 const TABLES = {
   settings: { label: '基本情報', single: true, note: 'アプリの名前は、参加者の画面の左上とスクリーンの待機画面に出ます。班と部屋は、公開にすると参加者が自分の呼び名をタップしたときに見えます（2日目に発表したいときは、それまで公開にしない）。', fields: [
     { k: 'title', label: 'アプリの名前' }, { k: 'show_profile', label: '班と部屋を参加者に公開する', type: 'checkbox' }] },
   members: { label: '名簿', note: '会社の情報を外に出さないため、名前は<b>ひらがなの下の名前かニックネーム</b>で入れます（例：れいや）。名字・漢字の氏名・社名は入れません。同じ呼び名の人がいたら「れいや2」のように分けます。参加者には、ここに入れた呼び名で申請してもらいます。',
-    sort: (a, b) => a.sort - b.sort || a.name.localeCompare(b.name, 'ja'), bulk: true,
+    sort: (a, b) => a.sort - b.sort || a.name.localeCompare(b.name, 'ja'),
+    bulk: { hint: '1行に1人、「呼び名,班,部屋」の形で貼り付けます（班と部屋は省略できます）。', example: 'れいや,A班,201\nみゆ,B班,202',
+      parse: (c, i, n) => c[0] && { name: c[0], team: c[1] || '', room: c[2] || '', sort: n + i + 1 } },
     fields: [{ k: 'name', label: '呼び名（ひらがな・ニックネーム）' }, { k: 'team', label: '班' }, { k: 'room', label: '部屋' }, { k: 'sort', label: '並び順', type: 'number' }] },
   awards: { label: '表彰', secret: true, note: '経営陣が決めた部門と受賞者を入れます。受賞者も名簿と同じ呼び名で入れます。発表するまで参加者からは見えません。発表は「進行」タブから行います。',
     sort: (a, b) => a.sort - b.sort,
+    bulk: { hint: '1行に1つ、「部門,受賞者,ひとこと」の形で貼り付けます。', example: 'MVP,みゆ,みんなを引っぱってくれた1年でした\n新人賞,しょうた,',
+      parse: (c, i, n) => c[0] && { category: c[0], winner: c[1] || '', comment: c.slice(2).join('、'), sort: n + i + 1 } },
     fields: [{ k: 'category', label: '部門' }, { k: 'winner', label: '受賞者' }, { k: 'comment', label: '受賞理由・ひとこと', type: 'textarea' }, { k: 'sort', label: '発表順', type: 'number' }] },
   reveals: { label: '重大発表', secret: true, note: 'ここには<b>見出しだけ</b>を入れます（例：「新しい取り組みの発表」）。社外に出せない中身（取引先・金額・人事など）は入れず、スライドや口頭で伝えます。発表するまで参加者からは見えません。',
     sort: (a, b) => a.sort - b.sort,
+    bulk: { hint: '1行に1つ、見出しを貼り付けます。', example: '新しい取り組みの発表\n来年の合宿の行き先',
+      parse: (c, i, n) => c[0] && { title: c.join('、'), sort: n + i + 1 } },
     fields: [{ k: 'title', label: '発表の見出し' }, { k: 'body', label: 'ひとこと（任意。社外秘の中身は書かない）', type: 'textarea', rows: 3 }, { k: 'sort', label: '発表順', type: 'number' }] },
-  quiz_questions: { label: 'クイズ', note: '選択肢は1行に1つ書きます。正解は上から数えた番号（1から）で入れます。',
+  quiz_questions: { label: 'クイズ', note: '選択肢は1行に1つ書きます。正解は上から数えた番号（1から）で入れます。問題づくりは Claude に「合宿クイズを10問、貼り付け形式で」と頼むと、そのまま貼れる形で作れます。',
     sort: (a, b) => a.order_no - b.order_no,
+    bulk: { hint: '1行に1問、「問題,選択肢1,選択肢2,選択肢3,選択肢4,正解の番号」の形で貼り付けます（選択肢は2〜4個）。同じ番号の問題は上書きします。',
+      example: '合宿の会場がある県は？,静岡県,神奈川県,山梨県,千葉県,1\n今年いちばん使ったAIは？,Claude,Copilot,ChatGPT,Gemini,2',
+      parse: (c, i, n) => { const ans = Number(c[c.length - 1]); const ch = c.slice(1, -1);
+        return c[0] && ch.length >= 2 && ans >= 1 && ans <= ch.length && { order_no: n + i + 1, question_text: c[0], choices: ch, correct_index: ans - 1 }; } },
     fields: [{ k: 'order_no', label: '問題番号', type: 'number' }, { k: 'question_text', label: '問題文', type: 'textarea' },
       { k: 'choices', label: '選択肢（1行に1つ）', type: 'lines' }, { k: 'correct_index', label: '正解の番号', type: 'number', offset: 1 }],
     blank: rows => ({ order_no: Math.max(0, ...rows.map(r => r.order_no)) + 1, choices: ['', '', '', ''], correct_index: 0 }) },
+  program_steps: { label: '台本', note: '当日はこの順に「次へ」を押すだけで進みます。表彰・重大発表は、まだ発表していないものを発表順に1つずつ出します。「おすすめの台本」は「進行」タブから入れられます。',
+    sort: (a, b) => a.sort - b.sort,
+    fields: [{ k: 'sort', label: '順番', type: 'number' }, { k: 'kind', label: '種類', type: 'select', options: KINDS }, { k: 'label', label: '表示名（運営だけが見る）' },
+      { k: 'done', label: '済み', type: 'checkbox' }],
+    blank: rows => ({ sort: Math.max(0, ...rows.map(r => r.sort)) + 1, kind: 'quiz' }) },
 };
 const TAB_ORDER = [['live', '進行'], ['devices', '参加申請'], ...Object.entries(TABLES).map(([k, v]) => [k, v.label]), ['config', '設定']];
 
@@ -94,7 +113,7 @@ function init() {
     if (topic !== 'content') reload();
   });
 }
-const SCENE = { idle: '待機中', award: '表彰', reveal: '重大発表', quiz: 'クイズ', buzz: '早押し', bingo: 'ビンゴ' };
+const SCENE = { idle: '待機中', ranking: '総合ランキング発表', award: '表彰', reveal: '重大発表', quiz: 'クイズ', buzz: '早押し', bingo: 'ビンゴ' };
 function showScene() { document.getElementById('now-scene').textContent = `いまの場面：${SCENE[live.scene]}`; }
 
 function setTab(t) {
@@ -108,6 +127,7 @@ function setTab(t) {
 
 // ===== 表の編集（どの表も同じ作り） =====
 function fieldHtml(f, v) {
+  if (f.type === 'select') return `<label>${f.label}<select data-k="${f.k}">${f.options.map(([o, l]) => `<option value="${o}" ${o === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>`;
   if (f.type === 'checkbox') return `<label class="check"><input data-k="${f.k}" type="checkbox" ${v ? 'checked' : ''}>${f.label}</label>`;
   const val = f.type === 'lines' ? (v || []).join('\n') : f.offset ? (v ?? 0) + f.offset : (v ?? '');
   if (f.type === 'textarea' || f.type === 'lines') return `<label>${f.label}<textarea data-k="${f.k}" rows="${f.rows || (f.type === 'lines' ? 4 : 3)}">${esc(val)}</textarea></label>`;
@@ -138,9 +158,9 @@ async function renderTable(t) {
       <div class="row-btns"><button class="btn primary small" data-save>${isNew ? '追加する' : '保存'}</button>
       ${!isNew && !def.single ? '<button class="btn small danger" data-del>削除</button>' : ''}</div></div>`;
   $pane.innerHTML = `<h2>${def.label}${def.secret ? ' <span class="secret">発表まで非公開</span>' : ''}</h2><p class="sub">${def.note}</p>
-    ${t === 'members' ? `<p class="sub">${rows.length} 人。参加者の承認は「参加申請」タブで行います。</p>
-      <details class="ecard"><summary>まとめて追加する</summary><p class="sub">1行に1人、「呼び名,班,部屋」の形で貼り付けます（班と部屋は省略できます）。</p>
-      <textarea id="bulk" rows="8" placeholder="れいや,A班,201"></textarea><button class="btn primary small" id="bulk-add">まとめて追加する</button></details>` : ''}
+    ${t === 'members' ? `<p class="sub">${rows.length} 人。参加者の承認は「参加申請」タブで行います。</p>` : ''}
+    ${def.bulk ? `<details class="ecard" ${rows.length ? '' : 'open'}><summary><b>まとめて貼り付けて追加する</b></summary><p class="sub">${def.bulk.hint}区切りは「,」「、」タブのどれでも構いません。</p>
+      <textarea id="bulk" rows="7" placeholder="${esc(def.bulk.example)}"></textarea><button class="btn primary small" id="bulk-add">まとめて追加する</button></details>` : ''}
     ${def.single ? '' : card(def.blank ? def.blank(rows) : {}, true)}
     ${rows.map(r => card(r, false)).join('')}`;
 
@@ -161,12 +181,12 @@ async function renderTable(t) {
   });
   document.getElementById('bulk-add')?.addEventListener('click', async () => {
     const lines = document.getElementById('bulk').value.split('\n').map(s => s.trim()).filter(Boolean);
-    const base = rows.length;
-    for (const [i, line] of lines.entries()) {
-      const [name, team = '', room = ''] = line.split(/[,，\t]/).map(s => s.trim());
-      if (name) await rpc('admin_save', { tbl: 'members', row_data: { name, team, room, sort: base + i + 1 } });
-    }
-    toast(`${lines.length}人を追加しました`); renderTable(t);
+    const base = t === 'quiz_questions' ? Math.max(0, ...rows.map(r => r.order_no)) : rows.length;
+    const parsed = lines.map((line, i) => def.bulk.parse(line.split(/[,，、\t]/).map(x => x.trim()), i, base));
+    const bad = parsed.map((r, i) => r ? 0 : i + 1).filter(Boolean);
+    if (bad.length) return toast(`${bad.join('・')}行目の形が違います`, true);
+    for (const r of parsed) await rpc('admin_save', { tbl: t, row_data: r });
+    toast(`${parsed.length}件を追加しました`); renderTable(t);
   });
 }
 
@@ -216,13 +236,21 @@ async function renderLive() {
   if (renderedScene === live.scene && document.getElementById('now-box')) return refreshStatus();
   renderedScene = live.scene;
   const p = live.payload || {};
-  const [awards, reveals, qs] = await Promise.all([
-    rpc('admin_list', { tbl: 'awards' }), rpc('admin_list', { tbl: 'reveals' }), rpc('admin_list', { tbl: 'quiz_questions' }),
+  const [awards, reveals, qs, steps] = await Promise.all([
+    rpc('admin_list', { tbl: 'awards' }), rpc('admin_list', { tbl: 'reveals' }), rpc('admin_list', { tbl: 'quiz_questions' }), rpc('admin_list', { tbl: 'program_steps' }),
   ]);
-  awards.sort((a, b) => a.sort - b.sort); reveals.sort((a, b) => a.sort - b.sort);
+  awards.sort((a, b) => a.sort - b.sort); reveals.sort((a, b) => a.sort - b.sort); steps.sort((a, b) => a.sort - b.sort);
   const nq = qs.length;
+  const next = steps.find(x => !x.done);
 
   $pane.innerHTML = `
+    <section class="ecard program"><h3>台本</h3>
+      ${steps.length ? `<button class="next-btn" id="next-step" ${next ? '' : 'disabled'}>${next ? `次へ：${esc(next.label || KIND_NAME[next.kind])}` : '台本はすべて終わりました'}</button>
+        <ol class="steps">${steps.map(x => `<li class="${x.done ? 'done' : x === next ? 'next' : ''}"><span>${esc(x.label || KIND_NAME[x.kind])}</span><span class="sub">${KIND_NAME[x.kind]}</span></li>`).join('')}</ol>
+        <div class="row-btns"><button class="btn small" id="skip-step" ${next ? '' : 'disabled'}>この手順を飛ばす</button><button class="btn small" id="reset-steps">台本を最初に戻す</button></div>`
+      : `<p class="sub">台本を入れておくと、当日は「次へ」を押すだけで進みます。</p><button class="btn primary" id="seed-steps">おすすめの台本を入れる</button>`}
+    </section>
+
     <section class="ecard now-box"><div class="label">いまの場面</div><div class="big">${SCENE[live.scene]}</div>
       <div id="now-box"></div>
       <button class="btn" data-act="idle">待機に戻す（参加者の画面は「まもなく始まります」になります）</button></section>
@@ -243,11 +271,32 @@ async function renderLive() {
       <div class="row-btns"><button class="btn primary" data-act="buzz-new">新しい問題で受付開始</button>
       <button class="btn" data-act="buzz-close" ${live.scene === 'buzz' && p.open ? '' : 'disabled'}>締め切る</button></div></section>
 
+    <section class="ecard"><h3>総合ランキング</h3><p class="sub">クイズ・早押し・ビンゴの点の合計です。押すと全員の画面で5秒溜めてから表彰台が出ます。待機中の画面にも上位5人が出ています。</p>
+      <div class="row-btns"><button class="btn primary" data-act="ranking">総合ランキングを発表</button></div></section>
+
     <section class="ecard"><h3>ビンゴ</h3>
       <div class="row-btns"><button class="btn primary" data-act="bingo-start">新しいカードで始める</button>
       <button class="btn primary" data-act="bingo-draw" ${live.scene === 'bingo' ? '' : 'disabled'}>番号を引く</button></div></section>`;
 
   $pane.querySelectorAll('[data-act]').forEach(b => b.onclick = () => act(b.dataset.act, live.payload || {}, nq));
+  document.getElementById('seed-steps')?.addEventListener('click', async () => {
+    const plan = [['idle', '開場・参加の受付'], ['quiz', 'クイズ大会'], ['buzz', '早押し 第1問'], ['buzz', '早押し 第2問'], ['buzz', '早押し 第3問'], ['bingo', 'ビンゴ'],
+      ['ranking', '総合ランキング発表'], ...awards.map(a => ['award', `表彰：${a.category}`]), ...reveals.map(v => ['reveal', `重大発表：${v.title}`]), ['idle', 'おわり']];
+    for (const [i, [kind, label]] of plan.entries()) await rpc('admin_save', { tbl: 'program_steps', row_data: { sort: i + 1, kind, label } });
+    toast('おすすめの台本を入れました'); renderedScene = null; renderLive();
+  });
+  document.getElementById('next-step')?.addEventListener('click', async e => {
+    e.target.disabled = true;
+    try { await runStep(next, awards, reveals, nq); await rpc('admin_save', { tbl: 'program_steps', row_data: { id: next.id, done: true } }); }
+    finally { renderedScene = null; renderLive(); }
+  });
+  document.getElementById('skip-step')?.addEventListener('click', async () => {
+    await rpc('admin_save', { tbl: 'program_steps', row_data: { id: next.id, done: true } }); renderedScene = null; renderLive();
+  });
+  document.getElementById('reset-steps')?.addEventListener('click', async () => {
+    if (!confirm('台本の「済み」をすべて外して、最初からにします。よろしいですか？')) return;
+    await rpc('admin_reset', { what: 'program' }); renderedScene = null; renderLive();
+  });
   $pane.querySelectorAll('[data-present]').forEach(b => b.onclick = async () => {
     if (!confirm('全員の画面に発表します。よろしいですか？')) return;
     await rpc('admin_present', { p_kind: b.dataset.present, p_id: b.dataset.id, p_delay_sec: 5 });
@@ -266,19 +315,42 @@ function refreshStatus() {
       : p.phase === 'reveal' ? `Q${p.q} / ${p.total}　正解発表中（まもなく次の問題へ）`
       : `Q${p.q} / ${p.total}　出題中　回答 ${live.quiz?.answered ?? 0} / ${live.joined} 人`;
   } else if (live.scene === 'buzz') {
-    status = `第${p.round}問（${p.open ? '受付中' : '締め切り'}）　` + ((live.buzz || []).map((b, i) => `${i + 1}番 ${esc(b.name)}`).join('、') || 'まだ誰も押していません');
+    status = `第${p.round}問（${p.open ? '受付中' : '締め切り'}）` + ((live.buzz || []).length
+      ? `<div class="buzz-list">${live.buzz.map((b, i) => `<div><span>${i + 1}番 ${esc(b.name)}</span><button class="btn primary small" data-correct="${b.id}">正解 +300</button></div>`).join('')}</div>`
+      : '　まだ誰も押していません');
   } else if (live.scene === 'bingo') {
     status = `出た番号（${(p.numbers || []).length}個）：${(p.numbers || []).join('、') || 'まだありません'}<br>リーチ ${live.reach ?? 0}人　ビンゴの人：${(live.bingo_winners || []).map(esc).join('、') || 'まだいません'}`;
   }
   else if (live.scene === 'award') status = `${esc(p.category)}${p.winner !== undefined ? '：' + esc(p.winner) : '（発表の溜め中）'}`;
   else if (live.scene === 'reveal') status = p.title !== undefined ? esc(p.title) : '（発表の溜め中）';
   el.innerHTML = `<div>${status}</div><div class="sub">参加者 ${live.joined} 人（承認済み）</div>`;
+  el.querySelectorAll('[data-correct]').forEach(b => b.onclick = async () => {
+    await rpc('admin_buzz_correct', { p_member_id: b.dataset.correct, p_points: 300 });
+    b.disabled = true; b.textContent = '+300 付けました'; toast('300点を付けました');
+  });
   // 場面に応じてボタンの押せる・押せないを切り替える
   const dis = (act, off) => { const b = $pane.querySelector(`[data-act="${act}"]`); if (b) b.disabled = off; };
   dis('quiz-next', !(live.scene === 'quiz' && p.phase !== 'finished'));
   dis('quiz-finish', live.scene !== 'quiz');
   dis('buzz-close', !(live.scene === 'buzz' && p.open));
   dis('bingo-draw', live.scene !== 'bingo');
+}
+
+// 台本の1手順を実行する
+async function runStep(step, awards, reveals, nq) {
+  const p = live.payload || {};
+  switch (step.kind) {
+    case 'idle': return rpc('admin_set_live', { p_scene: 'idle', p_payload: {} });
+    case 'quiz': if (!nq) throw toast('クイズの問題がありません', true); return rpc('admin_quiz', { p_action: 'start' });
+    case 'buzz': return rpc('admin_set_live', { p_scene: 'buzz', p_payload: { round: (live.scene === 'buzz' ? p.round : 0) + 1, open: true, question: '' } });
+    case 'bingo': return rpc('admin_bingo', { p_action: 'start' });
+    case 'ranking': return rpc('admin_show_ranking', {});
+    case 'award': case 'reveal': {
+      const item = (step.kind === 'award' ? awards : reveals).find(x => !x.revealed);
+      if (!item) throw toast(step.kind === 'award' ? 'まだ発表していない表彰がありません' : 'まだ発表していない重大発表がありません', true);
+      return rpc('admin_present', { p_kind: step.kind, p_id: item.id, p_delay_sec: 5 });
+    }
+  }
 }
 
 async function act(a, p, nq) {
@@ -291,6 +363,7 @@ async function act(a, p, nq) {
       return rpc('admin_quiz', { p_action: 'start' });
     case 'quiz-next': return rpc('admin_quiz', { p_action: 'next' });
     case 'quiz-finish': return rpc('admin_quiz', { p_action: 'finish' });
+    case 'ranking': return rpc('admin_show_ranking', {});
     case 'buzz-new':
       return set('buzz', { round: (live.scene === 'buzz' ? p.round : 0) + 1, open: true, question: document.getElementById('b-q').value });
     case 'buzz-close': return set('buzz', { ...p, open: false });
@@ -309,7 +382,7 @@ function renderConfig() {
     <section class="ecard"><h3>運営パスコードを変える</h3><p class="sub">変えたら、新しいパスコードを運営陣に共有してください。</p>
       <input id="newpass" type="password" class="input" placeholder="新しいパスコード（12文字以上）"><button class="btn primary" id="chg">変える</button></section>
     <section class="ecard"><h3>リハーサルのあとに記録を消す</h3><p class="sub">本番の前に、リハーサルで残った記録を消します。中身（名簿・表彰・クイズの問題など）は消えません。</p>
-      <div class="row-btns"><button class="btn danger" data-reset="quiz">クイズの回答</button><button class="btn danger" data-reset="buzz">早押しの記録</button>
+      <div class="row-btns"><button class="btn danger" data-reset="quiz">クイズの回答</button><button class="btn danger" data-reset="buzz">早押しの記録</button><button class="btn danger" data-reset="score">総合点</button><button class="btn danger" data-reset="program">台本の「済み」</button>
       <button class="btn danger" data-reset="reactions">リアクション・ビンゴ</button><button class="btn danger" data-reset="present">表彰・重大発表の「発表済み」</button></div></section>
     <section class="ecard"><h3>合宿が終わったら：社員の情報と伏せていた中身をすべて消す</h3>
       <p class="sub">名簿・参加者の端末・表彰・重大発表・クイズの回答などを消します。クイズの問題とアプリの名前は残ります。元に戻せません。</p>

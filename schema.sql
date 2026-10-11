@@ -110,6 +110,26 @@ create table if not exists buzzes (
   unique (round, member_id)
 );
 
+-- 点の記録（総合ランキングのもと）。クイズ・早押し・ビンゴの点をここに積む
+create table if not exists score_events (
+  id bigserial primary key,
+  member_id uuid not null references members(id) on delete cascade,
+  game text not null,          -- quiz / buzz / bingo
+  points int not null,
+  note text default '',        -- Q1、早押し第2問 など
+  created_at timestamptz not null default now()
+);
+
+-- 当日の台本（運営は「次へ」を押すだけで、上から順に進む）
+create table if not exists program_steps (
+  id uuid primary key default gen_random_uuid(),
+  sort int not null default 0,
+  kind text not null check (kind in ('idle','quiz','buzz','bingo','ranking','award','reveal')),
+  label text not null default '',
+  ref uuid,                    -- 表彰・重大発表のときは、その行の id
+  done boolean not null default false
+);
+
 -- 合図。中身は持たない（どの種類が何回変わったかと、リアクションの絵文字の種類だけ）
 create table if not exists pulse (
   topic text primary key,
@@ -117,14 +137,14 @@ create table if not exists pulse (
   info jsonb not null default '{}',
   at timestamptz not null default now()
 );
-insert into pulse (topic) values ('content'), ('live'), ('quiz'), ('buzz'), ('react') on conflict do nothing;
+insert into pulse (topic) values ('content'), ('live'), ('quiz'), ('buzz'), ('react'), ('score'), ('admin') on conflict do nothing;
 
 -- ===== 権限：pulse 以外は直接読めない・書けない =====
 do $$
 declare t text;
 begin
   foreach t in array array['admin_config','settings','members','devices','awards','reveals',
-                           'quiz_questions','quiz_answers','live_state','reactions','buzzes','pulse'] loop
+                           'quiz_questions','quiz_answers','live_state','reactions','buzzes','pulse','score_events','program_steps'] loop
     execute format('alter table %I enable row level security', t);
   end loop;
   if not exists (select 1 from pg_policies where tablename = 'pulse' and policyname = 'pulse_read') then
@@ -151,7 +171,8 @@ declare r record;
 begin
   for r in select * from (values
     ('settings','content'), ('members','content'), ('devices','content'),
-    ('live_state','live'), ('quiz_answers','quiz'), ('buzzes','buzz'), ('reactions','react')) v(tbl, topic) loop
+    ('live_state','live'), ('quiz_answers','quiz'), ('buzzes','buzz'), ('reactions','react'),
+    ('score_events','score'), ('program_steps','admin')) v(tbl, topic) loop
     execute format('drop trigger if exists bump_%s on %I', r.tbl, r.tbl);
     execute format('create trigger bump_%s after insert or update or delete on %I for each row execute function _bump(%L)', r.tbl, r.tbl, r.topic);
   end loop;
@@ -207,9 +228,9 @@ begin
   select min(id::text)::uuid, count(*) into m, n from members
    where replace(replace(name, ' ', ''), '　', '') = replace(replace(trim(p_name), ' ', ''), '　', '');
   insert into devices (key_hash, typed_name, line_user_id, line_name, member_id)
-  values (_key_hash(p_key), trim(p_name), left(coalesce(p_line_user_id, ''), 64), left(coalesce(p_line_name, ''), 40), case when n = 1 then m end)
+  values (_key_hash(p_key), trim(p_name), '', left(coalesce(p_line_name, ''), 40), case when n = 1 then m end)
   on conflict (key_hash) do update set typed_name = excluded.typed_name, member_id = excluded.member_id,
-    line_user_id = excluded.line_user_id, line_name = excluded.line_name;
+    line_name = excluded.line_name;
   return 'pending';
 end $$;
 
@@ -230,6 +251,31 @@ language sql stable security definer set search_path = public as $$
          group by mb.id, mb.name
          order by score desc, mb.name
          limit p_limit) r;
+$$;
+
+-- 総合ランキング（点の記録の合計）
+create or replace function _total_ranking(p_limit int) returns jsonb
+language sql stable security definer set search_path = public as $$
+  select coalesce(jsonb_agg(jsonb_build_object('id', r.id, 'name', r.name, 'score', r.score) order by r.score desc, r.name), '[]')
+  from (select mb.id, mb.name, coalesce(sum(e.points), 0) as score
+          from members mb left join score_events e on e.member_id = mb.id
+         where mb.id in (select member_id from devices where status = 'approved')
+         group by mb.id, mb.name
+         order by score desc, mb.name
+         limit p_limit) r;
+$$;
+
+-- 自分の総合点と順位（同点は同じ順位）
+create or replace function _my_score(p_member uuid) returns jsonb
+language sql stable security definer set search_path = public as $$
+  with t as (select mb.id, coalesce(sum(e.points), 0) as score
+               from members mb left join score_events e on e.member_id = mb.id
+              where mb.id in (select member_id from devices where status = 'approved')
+              group by mb.id)
+  select jsonb_build_object('score', (select score from t where id = p_member),
+    'rank', (select count(*) + 1 from t where score > (select score from t where id = p_member)),
+    'total', (select count(*) from t))
+  where p_member is not null;
 $$;
 
 -- 次の問題へ（answering → reveal → 次の問題の answering … → finished）
@@ -274,11 +320,15 @@ begin
     p := p - 'winner' - 'comment' - 'title' - 'body';
   end if;
   select count(distinct member_id) into joined from devices where status = 'approved';
-  res := jsonb_build_object('scene', s.scene, 'payload', p, 'joined', joined, 'server_now', now());
+  res := jsonb_build_object('scene', s.scene, 'payload', p, 'joined', joined, 'server_now', now(), 'me_score', _my_score(me));
 
   if s.scene = 'idle' then
     res := res || jsonb_build_object('names', (
-      select coalesce(jsonb_agg(m.name order by d.created_at desc), '[]') from devices d join members m on m.id = d.member_id where d.status = 'approved'));
+      select coalesce(jsonb_agg(m.name order by d.created_at desc), '[]') from devices d join members m on m.id = d.member_id where d.status = 'approved'),
+      'leaders', _total_ranking(5));
+  elsif s.scene = 'ranking' then
+    -- 発表の時刻までは順位を返さない
+    if now() >= (p->>'show_at')::timestamptz then res := res || jsonb_build_object('leaders', _total_ranking(10)); end if;
   elsif s.scene = 'quiz' then
     ph := p->>'phase';
     select * into q from quiz_questions where order_no = (p->>'q')::int;
@@ -337,6 +387,7 @@ begin
   elapsed := extract(epoch from now() - coalesce((s.payload->>'started_at')::timestamptz, now()));
   pts := case when p_choice = q.correct_index then 500 + greatest(0, round(500 * (1 - elapsed / 20)))::int else 0 end;
   insert into quiz_answers (member_id, question_order, choice_index, points) values (me, p_q, p_choice, pts) on conflict do nothing;
+  if found and pts > 0 then insert into score_events (member_id, game, points, note) values (me, 'quiz', pts, 'Q' || p_q); end if;
   perform _quiz_step(false);
 end $$;
 
@@ -353,7 +404,7 @@ end $$;
 
 create or replace function react(p_key text, p_kind text) returns void
 language plpgsql security definer set search_path = public as $$
-declare me uuid;
+declare me uuid; since timestamptz; nth int;
 begin
   me := _member(p_key);
   if me is null then raise exception '参加の承認がまだです'; end if;
@@ -361,6 +412,14 @@ begin
   if p_kind in ('bingo', 'reach') and (select scene from live_state where id = 1) <> 'bingo' then raise exception 'ビンゴの最中ではありません'; end if;
   -- 連打で画面が埋まらないよう、1人1秒に1回まで（ビンゴ・リーチの宣言は除く）
   if p_kind not in ('bingo', 'reach') and exists (select 1 from reactions where member_id = me and created_at > now() - interval '1 second') then return; end if;
+  if p_kind = 'bingo' then
+    select coalesce((payload->>'started_at')::timestamptz, '-infinity') into since from live_state where id = 1;
+    -- 同じ回で2回目の宣言は数えない。宣言した順に 500 / 300 / 200 / 以降 100 点
+    if exists (select 1 from reactions where member_id = me and kind = 'bingo' and created_at >= since) then return; end if;
+    select count(distinct member_id) into nth from reactions where kind = 'bingo' and created_at >= since;
+    insert into score_events (member_id, game, points, note) values (me, 'bingo',
+      case nth when 0 then 500 when 1 then 300 when 2 then 200 else 100 end, 'ビンゴ ' || (nth + 1) || '番目');
+  end if;
   insert into reactions (member_id, kind) values (me, p_kind);
 end $$;
 
@@ -372,7 +431,7 @@ create or replace function _admin_guard(code text, tbl text) returns text
 language plpgsql stable security definer set search_path = public as $$
 begin
   if not is_admin(code) then raise exception 'パスコードが違います'; end if;
-  if tbl not in ('settings','members','awards','reveals','quiz_questions') then
+  if tbl not in ('settings','members','awards','reveals','quiz_questions','program_steps') then
     raise exception '編集できない表です: %', tbl;
   end if;
   return case tbl when 'quiz_questions' then 'order_no' else 'id' end;
@@ -389,11 +448,22 @@ end $$;
 
 create or replace function admin_save(code text, tbl text, row_data jsonb) returns jsonb
 language plpgsql security definer set search_path = public as $$
-declare pk text; cols text; sets text; r jsonb;
+declare pk text; cols text; sets text; r jsonb; found_row boolean;
 begin
   pk := _admin_guard(code, tbl);
   row_data := row_data - 'revealed' - 'created_at';
   if tbl <> 'quiz_questions' and (row_data->>pk) is null then row_data := row_data - pk; end if;
+  -- 既にある行は、渡した項目だけを書き換える（済みの印だけ付ける、など）
+  if (row_data->>pk) is not null then
+    execute format('select exists (select 1 from %I where %I::text = $1)', tbl, pk) into found_row using row_data->>pk;
+    if found_row then
+      select string_agg(format('%I = r.%I', k, k), ',') into sets from jsonb_object_keys(row_data) k where k <> pk;
+      if sets is null then return null; end if;
+      execute format('update %I as t set %s from jsonb_populate_record(null::%I, $1) as r where t.%I::text = $1->>%L returning to_jsonb(t)',
+        tbl, sets, tbl, pk, pk) into r using row_data;
+      return r;
+    end if;
+  end if;
   select string_agg(format('%I', k), ','), string_agg(format('%I = excluded.%I', k, k), ',') filter (where k <> pk)
     into cols, sets from jsonb_object_keys(row_data) k;
   execute format(
@@ -427,7 +497,7 @@ language plpgsql security definer set search_path = public as $$
 begin
   if not is_admin(code) then raise exception 'パスコードが違います'; end if;
   if p_member_id is null then raise exception '名簿の誰かを選んでください'; end if;
-  update devices set member_id = p_member_id, status = 'approved' where id = p_device_id;
+  update devices set member_id = p_member_id, status = 'approved', line_name = '', line_user_id = '' where id = p_device_id;
 end $$;
 
 create or replace function admin_approve_matched(code text) returns int
@@ -435,7 +505,7 @@ language plpgsql security definer set search_path = public as $$
 declare n int;
 begin
   if not is_admin(code) then raise exception 'パスコードが違います'; end if;
-  update devices set status = 'approved' where status = 'pending' and member_id is not null;
+  update devices set status = 'approved', line_name = '', line_user_id = '' where status = 'pending' and member_id is not null;
   get diagnostics n = row_count;
   return n;
 end $$;
@@ -454,6 +524,30 @@ begin
   if not is_admin(code) then raise exception 'パスコードが違います'; end if;
   if p_scene not in ('idle','buzz') then raise exception '切り替えられない場面です: %', p_scene; end if;
   update live_state set scene = p_scene, payload = coalesce(p_payload, '{}'), updated_at = now() where id = 1;
+end $$;
+
+-- 早押しで正解した人に点を付ける（同じ問題で同じ人には1回だけ）
+create or replace function admin_buzz_correct(code text, p_member_id uuid, p_points int default 300) returns void
+language plpgsql security definer set search_path = public as $$
+declare s live_state; v_note text;
+begin
+  if not is_admin(code) then raise exception 'パスコードが違います'; end if;
+  select * into s from live_state where id = 1;
+  if s.scene <> 'buzz' then raise exception '早押しの最中ではありません'; end if;
+  v_note := '早押し第' || (s.payload->>'round') || '問';
+  if exists (select 1 from score_events where member_id = p_member_id and game = 'buzz' and score_events.note = v_note) then
+    raise exception 'この人には既に点を付けています';
+  end if;
+  insert into score_events (member_id, game, points, note) values (p_member_id, 'buzz', p_points, v_note);
+end $$;
+
+-- 総合ランキングを発表する（5秒溜めてから順位が出る）
+create or replace function admin_show_ranking(code text) returns void
+language plpgsql security definer set search_path = public as $$
+begin
+  if not is_admin(code) then raise exception 'パスコードが違います'; end if;
+  update live_state set scene = 'ranking', updated_at = now(), payload = jsonb_build_object(
+    'show_at', to_char((now() + interval '5 seconds') at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')) where id = 1;
 end $$;
 
 -- ビンゴの操作（start: 新しいカードで始める / draw: まだ出ていない番号を1つ引く）
@@ -526,6 +620,8 @@ language plpgsql security definer set search_path = public as $$
 begin
   if not is_admin(code) then raise exception 'パスコードが違います'; end if;
   if what = 'quiz' then delete from quiz_answers where true;
+  elsif what = 'score' then delete from score_events where true;
+  elsif what = 'program' then update program_steps set done = false where true;
   elsif what = 'buzz' then delete from buzzes where true;
   elsif what = 'reactions' then delete from reactions where true;
   elsif what = 'present' then update awards set revealed = false where true; update reveals set revealed = false where true;
@@ -540,6 +636,7 @@ begin
   if not is_admin(code) then raise exception 'パスコードが違います'; end if;
   if confirm_text <> 'すべて消す' then raise exception '確認の文字が違います'; end if;
   delete from quiz_answers where true; delete from buzzes where true; delete from reactions where true;
+  delete from score_events where true; update program_steps set done = false where true;
   delete from devices where true; delete from members where true;
   delete from awards where true; delete from reveals where true;
   update live_state set scene = 'idle', payload = '{}', updated_at = now() where id = 1;
@@ -553,12 +650,45 @@ begin
   update admin_config set passcode_hash = extensions.crypt(new_code, extensions.gen_salt('bf', 10)) where id = 1;
 end $$;
 
+-- 開発用：データの中身をまとめて返す（dev/data-viewer.html が使う。運営パスコードが必要）
+-- 端末の合鍵の指紋と LINE のユーザー ID は返さない
+create or replace function admin_snapshot(code text) returns jsonb
+language plpgsql security definer set search_path = public as $$
+begin
+  if not is_admin(code) then raise exception 'パスコードが違います'; end if;
+  return jsonb_build_object(
+    'settings', (select coalesce(jsonb_agg(to_jsonb(t)), '[]') from settings t),
+    'members', (select coalesce(jsonb_agg(to_jsonb(t) order by t.sort, t.name), '[]') from members t),
+    'devices', (select coalesce(jsonb_agg(to_jsonb(t) - 'key_hash' - 'line_user_id' order by t.created_at), '[]') from devices t),
+    'awards', (select coalesce(jsonb_agg(to_jsonb(t) order by t.sort), '[]') from awards t),
+    'reveals', (select coalesce(jsonb_agg(to_jsonb(t) order by t.sort), '[]') from reveals t),
+    'quiz_questions', (select coalesce(jsonb_agg(to_jsonb(t) order by t.order_no), '[]') from quiz_questions t),
+    'quiz_answers', (select coalesce(jsonb_agg(to_jsonb(t) order by t.answered_at desc), '[]') from (select * from quiz_answers order by answered_at desc limit 100) t),
+    'live_state', (select coalesce(jsonb_agg(to_jsonb(t)), '[]') from live_state t),
+    'reactions', (select coalesce(jsonb_agg(to_jsonb(t) order by t.id desc), '[]') from (select * from reactions order by id desc limit 50) t),
+    'buzzes', (select coalesce(jsonb_agg(to_jsonb(t) order by t.id desc), '[]') from (select * from buzzes order by id desc limit 50) t),
+    'pulse', (select coalesce(jsonb_agg(to_jsonb(t) order by t.topic), '[]') from pulse t),
+    'score_events', (select coalesce(jsonb_agg(to_jsonb(t) order by t.id desc), '[]') from (select * from score_events order by id desc limit 100) t),
+    'program_steps', (select coalesce(jsonb_agg(to_jsonb(t) order by t.sort), '[]') from program_steps t),
+    'counts', jsonb_build_object(
+      'settings', (select count(*) from settings), 'members', (select count(*) from members), 'devices', (select count(*) from devices),
+      'awards', (select count(*) from awards), 'reveals', (select count(*) from reveals), 'quiz_questions', (select count(*) from quiz_questions),
+      'quiz_answers', (select count(*) from quiz_answers), 'live_state', (select count(*) from live_state), 'reactions', (select count(*) from reactions),
+      'buzzes', (select count(*) from buzzes), 'pulse', (select count(*) from pulse), 'admin_config', (select count(*) from admin_config),
+      'score_events', (select count(*) from score_events), 'program_steps', (select count(*) from program_steps)),
+    'server_now', now());
+end $$;
+
 -- 古い版の関数を片付ける
 drop function if exists _quiz_try_advance(int);
 
 -- 内部用の関数は画面から呼べないようにする
 revoke execute on function is_admin(text), _key_hash(text), _member(text), _check_view(text), _admin_guard(text, text),
-  _quiz_ranking(int), _quiz_step(boolean), set_initial_passcode(text), _bump() from public, anon, authenticated;
+  _quiz_ranking(int), _quiz_step(boolean), _total_ranking(int), _my_score(uuid), set_initial_passcode(text), _bump() from public, anon, authenticated;
+
+-- 承認済みの端末に残っていた LINE の表示名・ユーザー ID を消す（呼び名だけにする方針に合わせる）
+update devices set line_name = '', line_user_id = '' where status = 'approved' and (line_name <> '' or line_user_id <> '');
+update devices set line_user_id = '' where line_user_id <> '';
 
 -- ===== 仮の中身（運営パネルからいつでも書き換えられる。社員の情報は入れない） =====
 insert into quiz_questions (order_no, question_text, choices, correct_index) values

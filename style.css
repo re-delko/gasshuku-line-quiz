@@ -212,3 +212,27 @@ body.screen { background: var(--stage); color: #fff; overflow: hidden; height: 1
 #float { position: fixed; inset: 0; pointer-events: none; overflow: hidden; }
 .fl { position: absolute; bottom: -10vh; font-size: 8vh; animation: flup 3s ease-out forwards; }
 @keyframes flup { to { transform: translateY(-110vh); opacity: 0; } }
+
+/* ===== 総合ランキング・台本（追加） ===== */
+.my-score { display: flex; gap: 20px; justify-content: center; align-items: baseline; padding: 12px 22px; border-radius: 16px; background: rgba(255,255,255,.1); }
+.my-score b { font-family: var(--round); font-size: 30px; color: var(--gold); }
+.leaders { list-style: none; padding: 0; margin: 0; width: 100%; max-width: 420px; }
+.leaders li { display: flex; justify-content: space-between; padding: 9px 14px; margin: 5px 0; border-radius: 12px; background: rgba(255,255,255,.07); font-weight: 700; }
+.leaders li b { font-family: var(--round); color: var(--gold); margin-right: 10px; }
+.leaders li.me { background: var(--accent); }
+.program { border: 2px solid var(--ink); }
+.next-btn { display: block; width: 100%; padding: 18px; border: none; border-radius: 14px; background: var(--accent); color: #fff; font-size: 20px; font-weight: 800; box-shadow: 0 5px 0 #B22C05; cursor: pointer; }
+.next-btn:active { transform: translateY(3px); box-shadow: 0 2px 0 #B22C05; }
+.next-btn:disabled { background: #bbb; box-shadow: none; }
+.steps { padding-left: 1.6em; margin: 12px 0 4px; }
+.steps li { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid var(--line); }
+.steps li.done { opacity: .4; text-decoration: line-through; }
+.steps li.next { font-weight: 800; color: var(--accent); }
+.buzz-list div { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px solid var(--line); }
+.ecard select { margin-top: 4px; }
+@media (max-width: 600px) {
+  .adm-hd { padding: 10px 14px; gap: 8px; } .adm-hd .sub { font-size: 12px; }
+  #pane { padding: 10px; } .ecard { padding: 14px; }
+  .btn { padding: 12px 16px; } .btn.small { padding: 9px 12px; }
+  .present { flex-wrap: wrap; }
+}

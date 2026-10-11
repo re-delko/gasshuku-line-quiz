@@ -92,6 +92,7 @@ async function start() {
   const reloadLive = debounce(refreshLive, 150);
   onPulse((topic, info) => {
     if (topic === 'content' || topic === 'poll') reloadAll();
+    else if (topic === 'admin') return;
     else if (topic === 'react') { if (info.kind === 'bingo' || info.kind === 'reach') reloadLive(); }
     else reloadLive();
   });
@@ -139,6 +140,7 @@ function render() {
     case 'buzz': return renderBuzz(p, live.buzz || []);
     case 'bingo': return renderBingo(p);
     case 'award': case 'reveal': return renderStage(p);
+    case 'ranking': return renderRanking(p);
     default: return renderLobby();
   }
 }
@@ -148,8 +150,9 @@ function renderLobby() {
   fill(`<div class="lobby-emoji">🎉</div>
     <div class="kicker">STAND BY</div>
     <div class="headline">まもなく<br>ゲームが始まります</div>
-    <div><div class="count-big">${live.joined ?? 0}</div><div class="muted">人が参加中</div></div>
-    <div class="names">${names.slice(0, 40).map(n => `<span class="${n === me?.name ? 'me' : ''}">${esc(n)}</span>`).join('')}</div>
+    ${myScoreHtml()}
+    ${hasScores() ? leadersHtml(live.leaders) : `<div><div class="count-big">${live.joined ?? 0}</div><div class="muted">人が参加中</div></div>
+      <div class="names">${names.slice(0, 40).map(n => `<span class="${n === me?.name ? 'me' : ''}">${esc(n)}</span>`).join('')}</div>`}
     <div class="muted">始まると、この画面が自動で切り替わります</div>`);
 }
 
@@ -271,6 +274,36 @@ function renderStage(p) {
         call('react', { p_key: KEY, p_kind: b.dataset.k }).catch(() => {});
         b.classList.remove('pop'); void b.offsetWidth; b.classList.add('pop');
       }));
+    }
+  };
+  draw(); if (secondsUntil(p.show_at) > 0) tick = setInterval(draw, 250);
+}
+
+// 自分の総合点と順位
+const hasScores = () => (live.leaders || []).some(r => r.score > 0);
+function myScoreHtml() {
+  const m = live.me_score;
+  if (!m || !hasScores()) return '';
+  return `<div class="my-score"><div><div class="muted">総合</div><b>${m.score.toLocaleString()}</b> 点</div><div><div class="muted">順位</div><b>${m.rank}</b> 位 / ${m.total}人</div></div>`;
+}
+function leadersHtml(rows) {
+  return `<ol class="leaders">${(rows || []).map((r, i) => `<li class="${r.id === me?.id ? 'me' : ''}"><span><b>${i + 1}</b>${esc(r.name)}</span><span>${r.score.toLocaleString()}点</span></li>`).join('')}</ol>`;
+}
+
+// 総合ランキング発表（順位は発表の時刻までサーバーから届かない）
+function renderRanking(p) {
+  const draw = () => {
+    const left = secondsUntil(p.show_at);
+    if (left > 0 || !live.leaders) {
+      $view.innerHTML = `<div class="stage"><div class="kicker">TOTAL RANKING</div><div class="stage-cat">総合ランキング</div>
+        <div class="drum">1位は…… ドゥルルルル</div><div class="count">${left || '…'}</div></div>`;
+      if (left === 0) { clearInterval(tick); tick = null; setTimeout(refreshLive, 300); }
+    } else {
+      clearInterval(tick); tick = null;
+      const rank = live.leaders, m = live.me_score;
+      $view.innerHTML = `<div class="screen-fill"><div class="kicker">TOTAL RANKING</div><div class="headline">総合ランキング</div>
+        ${podiumHtml(rank)}${m ? `<div class="rank-card">あなたは ${m.rank}位　${m.score.toLocaleString()}点</div>` : ''}${leadersHtml(rank.slice(3))}</div>`;
+      fx(`ranking-${p.show_at}`, () => { confetti(m?.rank === 1 ? 160 : 90); buzzVibe([80, 50, 80]); });
     }
   };
   draw(); if (secondsUntil(p.show_at) > 0) tick = setInterval(draw, 250);

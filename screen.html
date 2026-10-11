@@ -51,6 +51,7 @@ async function start() {
   onPulse((topic, info) => {
     if (topic === 'react') { floatEmoji(info.kind); if (info.kind === 'bingo' || info.kind === 'reach') reloadLive(); }
     else if (topic === 'content' || topic === 'poll') reloadAll();
+    else if (topic === 'admin') return;
     else reloadLive();
   });
 }
@@ -80,11 +81,14 @@ function render() {
       return;
     }
     case 'award': case 'reveal': return renderStage(p);
+    case 'ranking': return renderRanking(p);
     default: {
       const names = live.names || [];
       show(`<div class="sc-kind">STAND BY</div><div class="sc-title">${esc(title)}</div>
-        <div><div class="sc-count">${live.joined ?? 0}</div><div class="sc-sub">人が参加中</div></div>
-        <div class="sc-names">${names.slice(0, 60).map(n => `<span>${esc(n)}</span>`).join('')}</div>
+        ${(live.leaders || []).some(r => r.score > 0)
+          ? `<div class="sc-sub">いまの総合ランキング</div><ol class="sc-board">${live.leaders.map((r, i) => `<li><span><b>${i + 1}</b>${esc(r.name)}</span><span>${r.score.toLocaleString()}点</span></li>`).join('')}</ol>`
+          : `<div><div class="sc-count">${live.joined ?? 0}</div><div class="sc-sub">人が参加中</div></div>
+             <div class="sc-names">${names.slice(0, 60).map(n => `<span>${esc(n)}</span>`).join('')}</div>`}
         <div class="sc-join">LINE の合宿アカウントから「合宿あそび」を開いて参加</div>`);
     }
   }
@@ -133,6 +137,25 @@ function renderStage(p) {
         <div class="sc-winner">${esc(isAward ? p.winner : p.title)}</div>
         <div class="sc-sub">${escBr(isAward ? p.comment : p.body)}</div>`, 'dark');
       fx(`stage-${p.id}-${p.show_at}`, () => confetti(160));
+    }
+  };
+  draw(); if (secondsUntil(p.show_at) > 0) tick = setInterval(draw, 250);
+}
+
+// 総合ランキング発表
+function renderRanking(p) {
+  const draw = () => {
+    const left = secondsUntil(p.show_at);
+    if (left > 0 || !live.leaders) {
+      show(`<div class="sc-kind">TOTAL RANKING</div><div class="sc-title">総合ランキング</div>
+        <div class="sc-sub drum">1位は…… ドゥルルルル</div><div class="sc-big-count">${left || '…'}</div>`, 'dark');
+      if (left === 0) { clearInterval(tick); tick = null; setTimeout(refreshLive, 300); }
+    } else {
+      clearInterval(tick); tick = null;
+      const rank = live.leaders;
+      show(`<div class="sc-kind">TOTAL RANKING</div><div class="sc-title">総合ランキング</div>${podiumHtml(rank)}
+        <ol class="sc-board" style="width:50vw">${rank.slice(3, 8).map((r, i) => `<li><span><b>${i + 4}</b>${esc(r.name)}</span><span>${r.score.toLocaleString()}点</span></li>`).join('')}</ol>`, 'dark');
+      fx(`ranking-${p.show_at}`, () => setTimeout(() => confetti(180), 1000));
     }
   };
   draw(); if (secondsUntil(p.show_at) > 0) tick = setInterval(draw, 250);
